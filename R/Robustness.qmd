@@ -1,0 +1,786 @@
+---
+title: "Robustness"
+format: html
+---
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Essential libraries
+# install.packages("caret")
+# install.packages("glmnet")
+# install.packages("ranger")
+# install.packages("randomForest")
+# install.packages("xgboost")
+# install.packages("iml")
+# install.packages("slider")
+library(tidyverse)
+library(readxl)
+library(tidyr)
+library(stringr)
+library(lubridate)
+library(janitor)
+library(here)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(arrow)
+library(tidymodels)
+library(yardstick)
+library(purrr)
+library(tibble)
+library(rsample)   # group_initial_split
+library(caret)
+library(recipes)
+library(glmnet)
+library(pROC)
+library(ggplot2)
+library(ranger)
+library(iml)
+library(knitr)
+library(slider)
+# install.packages("ipumsr")   # Install if needed
+library(ipumsr)
+library(fixest)
+
+library(broom)
+library(gt)
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+dat_bound2 <- readRDS(here("data", "processed", "dat_bound2.rds"))
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+# ---------- 1) Build the sample for a given eps ----------
+prep_sample <- function(df, eps, tau_min = -6, tau_max = 12){
+  df %>%
+    mutate(
+      thr = mw_base + delta_event,
+      bound = as.integer(
+        !is.na(w_pre) & !is.na(mw_base) & !is.na(thr) &
+          w_pre >= (mw_base - eps) & w_pre < (thr + eps)
+      ),
+      treat_bound = as.integer(treated == 1 & bound == 1),
+      tau  = as.integer(tau),
+      ym   = as.integer(ym),
+      cell = interaction(SEX, EDUC, drop = TRUE)
+    ) %>%
+    filter(tau >= tau_min, tau <= tau_max)
+}
+
+# ---------- 2) Drop treated events with share_bound == 0 ----------
+drop_zero_bound_events <- function(df){
+  ev <- df %>%
+    filter(treated == 1) %>%
+    group_by(event_id) %>%
+    summarise(
+      share_bound = weighted.mean(bound == 1, EARNWT_adj, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  drop_events <- ev %>%
+    filter(share_bound == 0) %>%
+    pull(event_id)
+
+  df2 <- df %>%
+    filter(!(event_id %in% drop_events))
+
+  list(df = df2, ev = ev, drop_events = drop_events)
+}
+
+# ---------- 3) Extract bin coefficients robustly ----------
+extract_bins <- function(m){
+  td <- broom::tidy(m)
+
+  # The skeleton guarantees that both rows exist even if one term is missing
+  skeleton <- tibble(
+    key = c("post_short_tb", "post_mid_tb"),
+    Term = c(
+      "Post (1-6) × Treated × Bound",
+      "Post (7-11) × Treated × Bound"
+    )
+  )
+
+  out <- td %>%
+    mutate(
+      key = case_when(
+        grepl("post_short", term) & grepl("treat_bound", term) ~ "post_short_tb",
+        grepl("post_mid",   term) & grepl("treat_bound", term) ~ "post_mid_tb",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    filter(!is.na(key)) %>%
+    mutate(
+      stars = case_when(
+        p.value < 0.01 ~ "***",
+        p.value < 0.05 ~ "**",
+        p.value < 0.10 ~ "*",
+        TRUE ~ ""
+      ),
+      coef_se = sprintf("%.3f%s\n(%.3f)", estimate, stars, std.error)
+    ) %>%
+    select(key, coef_se)
+
+  skeleton %>%
+    left_join(out, by = "key") %>%
+    select(Term, coef_se)
+}
+
+# ---------- 4) Run one specification ----------
+get_wald_p <- function(w){
+  if (!is.null(w$p.value)) return(as.numeric(w$p.value))
+  if (!is.null(w$`p-value`)) return(as.numeric(w$`p-value`))
+  if (!is.null(w$p)) return(as.numeric(w$p))
+  NA_real_
+}
+
+run_spec <- function(df_raw, eps, tau_min = -6, tau_max = 12){
+  df0 <- prep_sample(df_raw, eps, tau_min, tau_max)
+
+  # Event count before dropping zero-bound treated events
+  n_events_total <- df0 %>%
+    distinct(event_id) %>%
+    nrow()
+
+  dropped <- drop_zero_bound_events(df0)
+  df <- dropped$df
+  drop_events <- dropped$drop_events
+  ev <- dropped$ev
+
+  n_events_kept <- df %>%
+    distinct(event_id) %>%
+    nrow()
+
+  # Dynamic tau model
+  m_tau <- feols(
+    UHRSWORKORG ~ i(tau, bound, ref = -1) + i(tau, treat_bound, ref = -1) + AGE + I(AGE^2)
+    | event_id^STATEFIP + event_id^ym + event_id^cell + UNION + OCC2010 + IND,
+    data = df,
+    weights = ~EARNWT_adj,
+    cluster = ~STATEFIP + event_id,
+    lean = TRUE
+  )
+
+  w_pre <- fixest::wald(m_tau, keep = "tau::-(6|5|4|3|2):treat_bound")
+  p_pre <- get_wald_p(w_pre)
+
+  # Bin model
+  df_bins <- df %>%
+    filter(tau != 0) %>%
+    mutate(
+      post_short = as.integer(tau >= 1 & tau <= 6),
+      post_mid   = as.integer(tau >= 7 & tau <= 11)
+    )
+
+  m_bins <- feols(
+    UHRSWORKORG ~
+      post_short:treat_bound + post_mid:treat_bound +
+      post_short:bound + post_mid:bound +
+      AGE + I(AGE^2)
+    | event_id^STATEFIP + event_id^ym + event_id^cell + UNION + OCC2010 + IND,
+    data = df_bins,
+    weights = ~EARNWT_adj,
+    cluster = ~STATEFIP + event_id,
+    lean = TRUE
+  )
+
+  tab_bins <- extract_bins(m_bins)
+
+  list(
+    eps = eps,
+    n_events_total = n_events_total,
+    n_events_kept = n_events_kept,
+    n_events_dropped = length(drop_events),
+    p_pretrend = p_pre,
+    tab_bins = tab_bins,
+    m_tau = m_tau,
+    m_bins = m_bins,
+    event_summary = ev
+  )
+}
+
+# ---------- 5) Run specifications ----------
+spec0  <- run_spec(dat_bound2, eps = 0.00)
+spec25 <- run_spec(dat_bound2, eps = 0.25)
+spec50 <- run_spec(dat_bound2, eps = 0.50)
+
+# ---------- 6) Build comparison table ----------
+tab_bins_all <- spec0$tab_bins %>%
+  rename(`eps=0` = coef_se) %>%
+  left_join(
+    spec25$tab_bins %>% rename(`eps=0.25` = coef_se),
+    by = "Term"
+  ) %>%
+  left_join(
+    spec50$tab_bins %>% rename(`eps=0.50` = coef_se),
+    by = "Term"
+  ) %>%
+  bind_rows(
+    tibble(
+      Term = "Pre-trend Wald p-value (τ = -6 to -2)",
+      `eps=0`    = sprintf("%.3f", spec0$p_pretrend),
+      `eps=0.25` = sprintf("%.3f", spec25$p_pretrend),
+      `eps=0.50` = sprintf("%.3f", spec50$p_pretrend)
+    ),
+    tibble(
+      Term = "Treated events dropped (share_bound = 0)",
+      `eps=0`    = as.character(spec0$n_events_dropped),
+      `eps=0.25` = as.character(spec25$n_events_dropped),
+      `eps=0.50` = as.character(spec50$n_events_dropped)
+    ),
+    tibble(
+      Term = "Event × State FE",
+      `eps=0`    = "Yes",
+      `eps=0.25` = "Yes",
+      `eps=0.50` = "Yes"
+    ),
+    tibble(
+      Term = "Event × Month FE",
+      `eps=0`    = "Yes",
+      `eps=0.25` = "Yes",
+      `eps=0.50` = "Yes"
+    ),
+    tibble(
+      Term = "Event × Cell FE",
+      `eps=0`    = "Yes",
+      `eps=0.25` = "Yes",
+      `eps=0.50` = "Yes"
+    ),
+    tibble(
+      Term = "Industry / Occupation / Union FE",
+      `eps=0`    = "Yes",
+      `eps=0.25` = "Yes",
+      `eps=0.50` = "Yes"
+    ),
+    tibble(
+      Term = "Age Controls",
+      `eps=0`    = "Age, Age²",
+      `eps=0.25` = "Age, Age²",
+      `eps=0.50` = "Age, Age²"
+    ),
+    tibble(
+      Term = "Clustered SE",
+      `eps=0`    = "State & Event",
+      `eps=0.25` = "State & Event",
+      `eps=0.50` = "State & Event"
+    )
+  )
+
+gt_bins <- tab_bins_all %>%
+  gt() %>%
+  tab_header(title = "5.1 Robustness: Bound Definition and Event Dropping") %>%
+  cols_label(
+    Term = "",
+    `eps=0` = "eps=0",
+    `eps=0.25` = "eps=0.25",
+    `eps=0.50` = "eps=0.50"
+  ) %>%
+  cols_width(
+    Term ~ px(400),
+    `eps=0` ~ px(150),
+    `eps=0.25` ~ px(150),
+    `eps=0.50` ~ px(150)
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "pre-line"),
+    locations = cells_body()
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "pre-line"),
+    locations = cells_source_notes()
+  ) %>%
+  tab_options(
+    table.font.size = "small",
+    data_row.padding = px(3),
+    source_notes.font.size = "small"
+  )
+
+gtsave(
+  gt_bins,
+  here("tables", "robust_bound_eps_compare.png"),
+  vwidth = 1700,
+  vheight = 1100
+)
+
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+dat_main_eps <- readRDS(here("data", "processed", "dat_main_eps.rds"))
+
+# --- Common transformations ---
+dat_main_eps <- dat_main_eps %>%
+  mutate(
+    tau  = as.integer(tau),
+    ym   = as.integer(ym),
+    cell = if ("cell" %in% names(.)) cell else interaction(SEX, EDUC, drop = TRUE)
+  ) %>%
+  filter(tau >= -6, tau <= 12)
+
+dat_bins <- dat_main_eps %>%
+  filter(tau != 0) %>%
+  mutate(
+    post_short = as.integer(tau >= 1 & tau <= 6),
+    post_mid   = as.integer(tau >= 7 & tau <= 11)
+  )
+
+# --- Formulas: baseline vs. dropping OCC/IND/UNION controls ---
+fe_core <- "event_id^STATEFIP + event_id^ym + event_id^cell"
+
+fe_full <- paste0(fe_core, " + UNION + OCC2010 + IND")
+fe_drop <- fe_core
+
+f_bins_full <- as.formula(paste0(
+  "UHRSWORKORG ~ post_short:treat_bound_eps + post_mid:treat_bound_eps + ",
+  "post_short:bound_eps + post_mid:bound_eps + AGE + I(AGE^2) | ", fe_full
+))
+f_bins_drop <- as.formula(paste0(
+  "UHRSWORKORG ~ post_short:treat_bound_eps + post_mid:treat_bound_eps + ",
+  "post_short:bound_eps + post_mid:bound_eps + AGE + I(AGE^2) | ", fe_drop
+))
+
+f_tau_full <- as.formula(paste0(
+  "UHRSWORKORG ~ i(tau, bound_eps, ref=-1) + i(tau, treat_bound_eps, ref=-1) + AGE + I(AGE^2) | ",
+  fe_full
+))
+f_tau_drop <- as.formula(paste0(
+  "UHRSWORKORG ~ i(tau, bound_eps, ref=-1) + i(tau, treat_bound_eps, ref=-1) + AGE + I(AGE^2) | ",
+  fe_drop
+))
+
+# --- Run models ---
+m_bins_full <- feols(
+  f_bins_full, data = dat_bins,
+  weights = ~EARNWT_adj, cluster = ~STATEFIP + event_id, lean = TRUE
+)
+m_bins_drop <- feols(
+  f_bins_drop, data = dat_bins,
+  weights = ~EARNWT_adj, cluster = ~STATEFIP + event_id, lean = TRUE
+)
+
+m_tau_full <- feols(
+  f_tau_full, data = dat_main_eps,
+  weights = ~EARNWT_adj, cluster = ~STATEFIP + event_id, lean = TRUE
+)
+m_tau_drop <- feols(
+  f_tau_drop, data = dat_main_eps,
+  weights = ~EARNWT_adj, cluster = ~STATEFIP + event_id, lean = TRUE
+)
+
+# --- Pre-trend Wald p-values ---
+get_p <- function(w){
+  if (!is.null(w$p.value)) return(as.numeric(w$p.value))
+  if (!is.null(w$`p-value`)) return(as.numeric(w$`p-value`))
+  if (!is.null(w$p)) return(as.numeric(w$p))
+  NA_real_
+}
+
+p_pre_full <- get_p(fixest::wald(m_tau_full, keep = "tau::-(6|5|4|3|2):treat_bound_eps"))
+p_pre_drop <- get_p(fixest::wald(m_tau_drop, keep = "tau::-(6|5|4|3|2):treat_bound_eps"))
+
+# --- Helper to extract bin coefficients (SE in parentheses) ---
+
+extract_bins <- function(m){
+  td <- broom::tidy(m)
+
+  wanted <- tibble(
+    Term = c(
+      "Post (1-6) × Treated × Bound",
+      "Post (7-11) × Treated × Bound"
+    ),
+    term_pattern = c(
+      "^post_short:treat_bound_eps$|^treat_bound_eps:post_short$",
+      "^post_mid:treat_bound_eps$|^treat_bound_eps:post_mid$"
+    )
+  )
+
+  wanted %>%
+    rowwise() %>%
+    mutate(
+      estimate = td$estimate[grepl(term_pattern, td$term)][1],
+      std.error = td$std.error[grepl(term_pattern, td$term)][1],
+      p.value = td$p.value[grepl(term_pattern, td$term)][1]
+    ) %>%
+    ungroup() %>%
+    mutate(
+      stars = case_when(
+        is.na(p.value) ~ "",
+        p.value < 0.01 ~ "***",
+        p.value < 0.05 ~ "**",
+        p.value < 0.10 ~ "*",
+        TRUE ~ ""
+      ),
+      coef_se = ifelse(
+        is.na(estimate),
+        NA_character_,
+        sprintf("%.3f%s\n(%.3f)", estimate, stars, std.error)
+      )
+    ) %>%
+    select(Term, coef_se)
+}
+
+tab_full <- extract_bins(m_bins_full) %>% rename(`Full controls` = coef_se)
+tab_drop <- extract_bins(m_bins_drop) %>% rename(`Drop OCC/IND/UNION` = coef_se)
+
+tab <- tab_full %>%
+  left_join(tab_drop, by = "Term") %>%
+  bind_rows(
+    tibble(
+      Term = "Pre-trend Wald p-value (τ = -6 to -2)",
+      `Full controls` = sprintf("%.3f", p_pre_full),
+      `Drop OCC/IND/UNION` = sprintf("%.3f", p_pre_drop)
+    ),
+    tibble(
+      Term = "Observations",
+      `Full controls` = format(broom::glance(m_bins_full)$nobs, big.mark = ","),
+      `Drop OCC/IND/UNION` = format(broom::glance(m_bins_drop)$nobs, big.mark = ",")
+    ),
+    tibble(
+      Term = "Event × State FE",
+      `Full controls` = "Yes",
+      `Drop OCC/IND/UNION` = "Yes"
+    ),
+    tibble(
+      Term = "Event × Month FE",
+      `Full controls` = "Yes",
+      `Drop OCC/IND/UNION` = "Yes"
+    ),
+    tibble(
+      Term = "Event × Cell FE",
+      `Full controls` = "Yes",
+      `Drop OCC/IND/UNION` = "Yes"
+    ),
+    tibble(
+      Term = "Industry / Occupation / Union FE",
+      `Full controls` = "Yes",
+      `Drop OCC/IND/UNION` = "No"
+    ),
+    tibble(
+      Term = "Clustered SE",
+      `Full controls` = "State & Event",
+      `Drop OCC/IND/UNION` = "State & Event"
+    )
+  )
+
+gt_tab <- tab %>%
+  gt() %>%
+  tab_header(title = "5.2 Robustness: Dropping Industry/Occupation/Union Controls") %>%
+  cols_label(
+    Term = "",
+    `Full controls` = "Full controls",
+    `Drop OCC/IND/UNION` = "Drop OCC/IND/UNION"
+  ) %>%
+  cols_width(
+    Term ~ px(400),
+    `Full controls` ~ px(225),
+    `Drop OCC/IND/UNION` ~ px(225)
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "pre-line"),
+    locations = cells_body()
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "pre-line"),
+    locations = cells_source_notes()
+  ) %>%
+  tab_options(
+    table.font.size = "small",
+    data_row.padding = px(3),
+    source_notes.font.size = "small"
+  )
+
+gtsave(gt_tab, here("tables", "robust_drop_controls.png"), vwidth = 1400, vheight = 900)
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+dat_main_eps <- readRDS(here("data", "processed", "dat_main_eps.rds"))
+tau_support <- dat_main_eps %>%
+  mutate(tau = as.integer(tau)) %>%
+  # Match the main text: use the [-6, 12] window; if tau == 0 is dropped there, drop it here too
+  filter(tau >= -6, tau <= 12) %>%
+  # filter(tau != 0) %>%   # Uncomment if you want the appendix to exclude tau == 0 as well
+  group_by(tau) %>%
+  summarise(
+    `Events (any obs)`     = n_distinct(event_id),
+    `Events (treated obs)` = n_distinct(event_id[treated == 1]),
+    `Treated obs`          = sum(treated == 1, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(tau)
+
+gt_tau_support <- tau_support %>%
+  gt(rowname_col = "tau") %>%
+  tab_header(
+    title = "Appendix B: Event Support by Event Time (τ)"
+  ) %>%
+  cols_label(
+    tau = html("Event time, &tau;")
+  )%>%
+  tab_stubhead(label = html("&tau;")) %>%
+  fmt_number(
+    columns = c(`Events (any obs)`, `Events (treated obs)`),
+    decimals = 0
+  ) %>%
+  fmt_number(
+    columns = c(`Treated obs`),
+    decimals = 0,
+    use_seps = TRUE
+  ) %>%
+  cols_width(
+    stub() ~ px(55),
+    `Events (any obs)` ~ px(150),
+    `Events (treated obs)` ~ px(170),
+    `Treated obs` ~ px(120)
+  ) %>%
+  tab_options(
+    table.font.size = px(11),
+    heading.title.font.size = px(14),
+    data_row.padding = px(1),
+    column_labels.padding = px(2),
+    source_notes.font.size = px(10),
+    table.width = px(520)
+  )
+
+# Save as a PNG for PDF inclusion
+gtsave(
+  gt_tau_support,
+  filename = here("tables", "app_tau_event_support.png"),
+  vwidth = 1400,
+  vheight = 900
+)
+
+# Optionally save an HTML version as well
+gtsave(gt_tau_support, here("tables", "app_tau_event_support.html"))
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+dat_bound2b <- readRDS(here("data", "processed", "dat_bound2b.rds"))
+# ===== 0) Prepare the analysis sample (matching the main specification) =====
+df <- dat_bound2b %>%
+  mutate(
+    tau  = as.integer(tau),
+    ym   = as.integer(ym),
+    cell = interaction(SEX, EDUC, drop = TRUE)
+  ) %>%
+  filter(tau >= -6, tau <= 12) %>%
+  filter(tau != 0) %>%                 # Recommended: drop tau == 0
+  filter(!is.na(delta_event))
+
+# ===== 1) Create event-level terciles without dropping events =====
+ev_grp <- df %>%
+  distinct(event_id, delta_event)
+
+q33 <- quantile(ev_grp$delta_event, 1/3, na.rm = TRUE)
+q66 <- quantile(ev_grp$delta_event, 2/3, na.rm = TRUE)
+
+ev_grp <- ev_grp %>%
+  mutate(shock_grp = case_when(
+    delta_event <= q33 ~ "small",
+    delta_event <= q66 ~ "medium",
+    TRUE               ~ "large"
+  ))
+
+df <- df %>% left_join(ev_grp, by = c("event_id","delta_event"))
+# ===== 2) Recover event state, year-month, and shock group for each event =====
+# The event month is conceptually tau == 0, but tau == 0 was dropped above.
+# So the event-level metadata are recovered directly from dat_bound2b for a more robust lookup.
+
+event_info <- dat_bound2b %>%
+  mutate(
+    tau = as.integer(tau),
+    ym  = as.integer(ym)
+  ) %>%
+  filter(!is.na(delta_event)) %>%
+  # Keep only treated-state event metadata; update this if your treated variable has a different name
+  filter(treated == 1) %>%
+  group_by(event_id) %>%
+  # Use tau == 0 when available; otherwise fall back to the month closest to zero
+  arrange(abs(tau), tau) %>%
+  summarise(
+    STATEFIP   = first(STATEFIP),
+    event_ym   = ym[which.min(abs(tau))],
+    delta_event= first(delta_event),
+    .groups = "drop"
+  ) %>%
+  left_join(ev_grp, by = c("event_id", "delta_event"))
+
+# ===== 3) Use state names when available; otherwise map STATEFIP to names =====
+# This is a simple built-in crosswalk, including DC
+state_crosswalk <- tibble::tribble(
+  ~STATEFIP, ~state_name,
+   1, "Alabama",  2, "Alaska",   4, "Arizona",   5, "Arkansas",
+   6, "California", 8, "Colorado", 9, "Connecticut", 10, "Delaware",
+  11, "District of Columbia", 12, "Florida", 13, "Georgia", 15, "Hawaii",
+  16, "Idaho", 17, "Illinois", 18, "Indiana", 19, "Iowa",
+  20, "Kansas", 21, "Kentucky", 22, "Louisiana", 23, "Maine",
+  24, "Maryland", 25, "Massachusetts", 26, "Michigan", 27, "Minnesota",
+  28, "Mississippi", 29, "Missouri", 30, "Montana", 31, "Nebraska",
+  32, "Nevada", 33, "New Hampshire", 34, "New Jersey", 35, "New Mexico",
+  36, "New York", 37, "North Carolina", 38, "North Dakota", 39, "Ohio",
+  40, "Oklahoma", 41, "Oregon", 42, "Pennsylvania", 44, "Rhode Island",
+  45, "South Carolina", 46, "South Dakota", 47, "Tennessee", 48, "Texas",
+  49, "Utah", 50, "Vermont", 51, "Virginia", 53, "Washington",
+  54, "West Virginia", 55, "Wisconsin", 56, "Wyoming"
+)
+
+event_info <- event_info %>%
+  left_join(state_crosswalk, by = "STATEFIP") %>%
+  mutate(
+    event_year  = event_ym %/% 100,
+    event_month = event_ym %% 100
+  ) %>%
+  arrange(shock_grp, delta_event, event_year, state_name)
+
+# Preview a few rows from each group
+event_info %>%
+  select(shock_grp, state_name, event_year, event_month, delta_event) %>%
+  print(n = 30)
+
+# ===== 4) Pick representative events from each group =====
+
+# small: the five smallest shocks
+small_ex <- event_info %>%
+  filter(shock_grp == "small") %>%
+  arrange(delta_event, event_year, state_name) %>%
+  slice_head(n = 5) %>%
+  mutate(example_type = "Smallest in small group")
+
+# medium: the five events closest to the median shock in the medium group
+med_median <- median(event_info$delta_event[event_info$shock_grp == "medium"], na.rm = TRUE)
+
+medium_ex <- event_info %>%
+  filter(shock_grp == "medium") %>%
+  mutate(dist_to_med = abs(delta_event - med_median)) %>%
+  arrange(dist_to_med, event_year, state_name) %>%
+  slice_head(n = 5) %>%
+  mutate(example_type = "Closest to medium-group median") %>%
+  select(-dist_to_med)
+
+# large: the five largest shocks
+large_ex <- event_info %>%
+  filter(shock_grp == "large") %>%
+  arrange(desc(delta_event), event_year, state_name) %>%
+  slice_head(n = 5) %>%
+  mutate(example_type = "Largest in large group")
+
+shock_examples <- bind_rows(small_ex, medium_ex, large_ex) %>%
+  mutate(
+    delta_event = sprintf("%.2f", delta_event),
+    event_date  = paste0(event_year, "-", sprintf("%02d", event_month))
+  ) %>%
+  select(example_type, shock_grp, state_name, event_date, delta_event)
+
+shock_examples
+
+
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+# ---------- Appendix Table C: Event support for event-specific post-mid estimates ----------
+
+out_dir <- here("tables")
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# 1) All original events, grouped into terciles
+all_events_tbl <- ev_shock %>%
+  mutate(
+    shock_grp = case_when(
+      delta_event <= q33 ~ "Small",
+      delta_event <= q66 ~ "Medium",
+      TRUE ~ "Large"
+    )
+  ) %>%
+  distinct(event_id, shock_grp)
+
+# 2) Events for which the event-specific post-mid effect is successfully estimated
+est_events_tbl <- ct %>%
+  mutate(
+    shock_grp = case_when(
+      delta_event <= q33 ~ "Small",
+      delta_event <= q66 ~ "Medium",
+      TRUE ~ "Large"
+    )
+  ) %>%
+  distinct(event_id, shock_grp)
+
+# 3) Flag dropped events
+drop_tbl <- all_events_tbl %>%
+  mutate(estimated = event_id %in% est_events_tbl$event_id) %>%
+  group_by(shock_grp) %>%
+  summarise(
+    Total_events = n(),
+    Estimated_events = sum(estimated),
+    Dropped_events = sum(!estimated),
+    Drop_share_num = Dropped_events / Total_events,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    shock_grp = factor(shock_grp, levels = c("Small", "Medium", "Large")),
+    Drop_share = sprintf("%.1f\\%%", 100 * Drop_share_num)
+  ) %>%
+  arrange(shock_grp) %>%
+  select(-Drop_share_num)
+
+# 4) Add a total row
+drop_tbl_total <- all_events_tbl %>%
+  mutate(estimated = event_id %in% est_events_tbl$event_id) %>%
+  summarise(
+    shock_grp = "Total",
+    Total_events = n(),
+    Estimated_events = sum(estimated),
+    Dropped_events = sum(!estimated),
+    Drop_share = sprintf("%.1f\\%%", 100 * Dropped_events / Total_events)
+  )
+
+# 5) Output the table
+drop_tbl_out <- bind_rows(drop_tbl, drop_tbl_total) %>%
+  mutate(shock_grp = as.character(shock_grp)) %>%
+  rename(
+    `Policy intensity group` = shock_grp,
+    `Total events` = Total_events,
+    `Events with estimated post-mid effect` = Estimated_events,
+    `Dropped events` = Dropped_events,
+    `Dropped share` = Drop_share
+  )
+
+drop_tex <- drop_tbl_out %>%
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    longtable = FALSE,
+    align = c("l", "c", "c", "c", "c"),
+    caption = "Appendix Table C. Event support for event-specific post-mid estimates",
+    col.names = c(
+      "Policy intensity group",
+      "Total events",
+      "Events with estimated post-mid effect",
+      "Dropped events",
+      "Dropped share"
+    ),
+    escape = FALSE
+  ) %>%
+  kable_styling(
+    latex_options = c("hold_position", "scale_down"),
+    font_size = 9
+  )
+
+save_kable(drop_tex, file = file.path(out_dir, "appendix_event_drop_support.tex"))
+```
+
+
+
+
+

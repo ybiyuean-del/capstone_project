@@ -1,0 +1,16 @@
+.Rproj.user/
+.Rhistory
+R/.Rhistory
+
+backup_touched_files_*/
+Literature Review/
+
+data/processed/
+data/raw/cps_00001.csv.gz
+
+*.html
+*.rds
+
+asec2025_ddl_pub_full.pdf
+Capstone-Minimum Wage - Google 文档.pdf
+Research_Design_yanbiyue_A69032912.pdf

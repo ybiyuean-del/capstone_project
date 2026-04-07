@@ -1,0 +1,920 @@
+---
+title: "Capstone3"
+format: html
+---
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Essential libraries
+# install.packages("caret")
+# install.packages("glmnet")
+# install.packages("ranger")
+# install.packages("randomForest")
+# install.packages("xgboost")
+# install.packages("iml")
+# install.packages("slider")
+library(tidyverse)
+library(readxl)
+library(tidyr)
+library(stringr)
+library(lubridate)
+library(janitor)
+library(here)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(arrow)
+library(tidymodels)
+library(yardstick)
+library(purrr)
+library(tibble)
+library(rsample)   # group_initial_split
+library(caret)
+library(recipes)
+library(glmnet)
+library(pROC)
+library(ggplot2)
+library(ranger)
+library(iml)
+library(knitr)
+library(slider)
+# install.packages("ipumsr")   # Install if needed
+library(ipumsr)
+library(fixest)
+
+library(broom)
+library(gt)
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+stacked_state_month_clean <- readRDS(here("data", "processed", "stacked_state_month_clean.rds"))
+mw_panel <- readRDS(here("data", "processed", "mw_panel.rds"))
+dat_main0 <- readRDS(here("data", "processed", "dat_main0.rds"))
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+# 1) Get the new minimum wage at tau = 0 for each event using the treated state only
+mw_new <- stacked_state_month_clean %>%
+  filter(tau == 0) %>%
+  distinct(event_id, treated_state, year, month) %>%   # Remove duplicates introduced by control states
+  left_join(
+    mw_panel %>% select(STATEFIP, year, month, mw_effective),
+    by = c("treated_state" = "STATEFIP", "year", "month")
+  ) %>%
+  transmute(event_id, mw_new = mw_effective) %>%
+  distinct(event_id, .keep_all = TRUE)                 # Extra safeguard: keep one row per event_id
+
+# 2) Join pre-policy cell wages back to the individual-level data
+cell_vars <- c("event_id", "STATEFIP", "SEX", "EDUC", "RACE", "HISPAN")
+
+cell_pre <- dat_main0 %>%
+  filter(tau >= -12, tau <= -1) %>%
+  group_by(across(all_of(cell_vars))) %>%
+  summarise(
+    w_pre = weighted.mean(HOURWAGE, EARNWT_adj, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+dat_bound <- dat_main0 %>%
+  left_join(cell_pre, by = cell_vars) %>%
+  left_join(mw_new, by = "event_id") %>%
+  mutate(
+    ym = YEAR * 100 + MONTH,
+    tau = as.integer(tau),
+    bound_any = as.integer(!is.na(w_pre) & w_pre < mw_new),
+    treat_bound = as.integer(treated == 1 & bound_any == 1)
+  )
+
+# Keep only cells that are observed in the pre-treatment period
+pre_cells <- dat_bound %>%
+  filter(tau <= -1, !is.na(w_pre)) %>%
+  distinct(across(all_of(cell_vars))) %>%
+  mutate(tag = 1)
+
+dat_bound <- dat_bound %>%
+  left_join(pre_cells, by = cell_vars) %>%
+  filter(tag == 1)
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+dat_bound %>%
+  group_by(tau) %>%
+  summarise(miss_wpre = mean(is.na(w_pre)), n = n(), .groups="drop") %>%
+  arrange(tau)
+```
+
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+# 1) Within dat_bound, get the treated-state baseline and new minimum wage for each event
+event_base_new <- dat_bound %>%
+  filter(treated == 1, tau == 0) %>%  # tau == 0 corresponds to the implementation month
+  distinct(event_id, mw_new, mw_base)
+
+# 2) Compute the dollar increase for each event
+event_base_new <- event_base_new %>%
+  mutate(delta_event = mw_new - mw_base)
+
+# 3) Join delta_event back to the stacked data and construct the counterfactual threshold
+dat_bound2 <- dat_bound %>%
+  left_join(event_base_new %>% select(event_id, delta_event), by = "event_id") %>%
+  mutate(
+    thr_cf = mw_base + delta_event,
+    bound_cf = as.integer(
+      !is.na(w_pre) & !is.na(mw_base) & !is.na(thr_cf) &
+      w_pre >= mw_base & w_pre < thr_cf
+    ),
+    treat_bound_cf = as.integer(treated == 1 & bound_cf == 1)
+  )
+
+write_rds(dat_bound2, here("data", "processed", "dat_bound2.rds"))
+
+# ===== Define a tolerance-band version of the bound indicator without dropping events =====
+eps <- 0.25  # You can also set eps = 0.50 as a robustness check
+
+dat_bound2b <- dat_bound2 %>%
+  mutate(
+    thr_cf = mw_base + delta_event,
+
+    # Original bound definition
+    bound_cf = as.integer(
+      !is.na(w_pre) & !is.na(mw_base) & !is.na(thr_cf) &
+      w_pre >= mw_base & w_pre < thr_cf
+    ),
+
+    # Tolerance-band version
+    bound_eps = as.integer(
+      !is.na(w_pre) & !is.na(mw_base) & !is.na(thr_cf) &
+      w_pre >= (mw_base - eps) & w_pre < (thr_cf + eps)
+    ),
+
+    treat_bound_cf  = as.integer(treated == 1 & bound_cf == 1),
+    treat_bound_eps = as.integer(treated == 1 & bound_eps == 1)
+  )
+
+write_rds(dat_bound2b, here("data", "processed", "dat_bound2b.rds"))
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Sanity check: identify events where the baseline minimum wage exceeds the new minimum wage
+dat_bound2 %>%
+  mutate(flag = mw_base > mw_new) %>%
+  group_by(event_id) %>%
+  summarise(share_base_above_new = mean(flag))
+
+event_flag <- dat_bound2 %>%
+  group_by(event_id) %>%
+  summarise(
+    any_high_base = any(mw_base > mw_new),
+    .groups = "drop"
+  )
+
+event_flag %>%
+  count(any_high_base)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+event_ok_eps <- dat_bound2b %>%
+  filter(treated == 1) %>%
+  group_by(event_id) %>%
+  summarise(
+    share_bound_cf  = weighted.mean(bound_cf  == 1, EARNWT_adj, na.rm=TRUE),
+    share_bound_eps = weighted.mean(bound_eps == 1, EARNWT_adj, na.rm=TRUE),
+    delta_event = first(delta_event),
+    .groups = "drop"
+  )
+
+summary(event_ok_eps$share_bound_cf)
+summary(event_ok_eps$share_bound_eps)
+
+# Check which events had zero support before but not after adding the tolerance band
+event_ok_eps %>%
+  summarise(
+    n_events = n(),
+    n_zero_cf  = sum(share_bound_cf  == 0, na.rm=TRUE),
+    n_zero_eps = sum(share_bound_eps == 0, na.rm=TRUE)
+  )
+  
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+dat_main_eps <- dat_bound2b %>%
+  mutate(
+    tau  = as.integer(tau),
+    ym   = as.integer(ym),
+    cell = interaction(SEX, EDUC, drop = TRUE)
+  ) %>%
+  filter(tau >= -6, tau <= 12)
+write_rds(dat_main_eps, here("data","processed","dat_main_eps.rds"))
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+dat_main_eps <- readRDS(here("data", "processed", "dat_main_eps.rds"))
+
+m_main_hours_eps <- feols(
+  UHRSWORKORG ~ i(tau, bound_eps, ref=-1) + i(tau, treat_bound_eps, ref=-1) + AGE + I(AGE^2)
+  | event_id^STATEFIP + event_id^ym + event_id^cell + UNION + OCC2010 + IND,
+  data = dat_main_eps,
+  weights = ~EARNWT_adj,
+  cluster = ~STATEFIP + event_id,
+  lean = TRUE
+)
+
+p_main <- iplot(
+  m_main_hours_eps,
+  i.select = 2,
+  ref.line = 0,
+  main = "Dynamic Effects of Minimum Wage Increases on Usual Weekly Hours",
+  xlab = "Event time (months relative to minimum-wage increase)",
+  ylab = "Effect on usual weekly hours (hours per week)"
+)
+
+# Save the figure
+png(
+  filename = here("tables", "fig_baseline_event_study.png"),
+  width = 2200, height = 1500, res = 300
+)
+
+fixest::iplot(
+  m_main_hours_eps,
+  i.select = 2,
+  ref.line = 0,
+  main = "Dynamic Effects of Minimum Wage Increases on Usual Weekly Hours",
+  xlab = "Event time (months relative to minimum-wage increase)",
+  ylab = "Effect on usual weekly hours (hours per week)"
+)
+
+dev.off()
+# Pre-trend test over the near leads
+fixest::wald(m_main_hours_eps, keep="tau::-(6|5|4|3|2):treat_bound_eps") 
+
+# Post short-run / medium-run Wald tests
+fixest::wald(m_main_hours_eps, keep="tau::(1|2|3|4|5|6):treat_bound_eps")
+fixest::wald(m_main_hours_eps, keep="tau::(7|8|9|10|11|12):treat_bound_eps")
+fixest::wald(m_main_hours_eps, keep="tau::(7|8|9|10|11):treat_bound_eps")
+```
+
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+dat_main_eps <- readRDS(here("data", "processed", "dat_main_eps.rds"))
+
+# -----------------------------
+# Common transformations
+# -----------------------------
+dat_main_eps <- dat_main_eps %>%
+  mutate(
+    tau  = as.integer(tau),
+    ym   = as.integer(ym),
+    cell = if ("cell" %in% names(.)) cell else interaction(SEX, EDUC, drop = TRUE)
+  ) %>%
+  filter(tau >= -6, tau <= 12)
+
+dat_bins <- dat_main_eps %>%
+  filter(tau != 0) %>%
+  mutate(
+    post_short = as.integer(tau >= 1 & tau <= 6),
+    post_mid   = as.integer(tau >= 7 & tau <= 11)
+  )
+
+# -----------------------------
+# Formulas
+# -----------------------------
+fe_full <- "event_id^STATEFIP + event_id^ym + event_id^cell + UNION + OCC2010 + IND"
+
+f_bins <- as.formula(paste0(
+  "UHRSWORKORG ~ post_short:treat_bound_eps + post_mid:treat_bound_eps + ",
+  "post_short:bound_eps + post_mid:bound_eps + AGE + I(AGE^2) | ", fe_full
+))
+
+f_tau <- as.formula(paste0(
+  "UHRSWORKORG ~ i(tau, bound_eps, ref=-1) + i(tau, treat_bound_eps, ref=-1) + ",
+  "AGE + I(AGE^2) | ", fe_full
+))
+
+# -----------------------------
+# Helpers
+# -----------------------------
+get_wald_p <- function(w){
+  if (!is.null(w$p.value)) return(as.numeric(w$p.value))
+  if (!is.null(w$`p-value`)) return(as.numeric(w$`p-value`))
+  if (!is.null(w$p)) return(as.numeric(w$p))
+  NA_real_
+}
+
+extract_bins <- function(m){
+  td <- broom::tidy(m)
+
+  # Allow for possible variation in the ordering of term names returned by fixest
+  wanted <- tibble(
+    Term = c(
+      "Post (1-6) × Treated × Bound",
+      "Post (7-11) × Treated × Bound"
+    ),
+    term_pattern = c(
+      "^post_short:treat_bound_eps$|^treat_bound_eps:post_short$",
+      "^post_mid:treat_bound_eps$|^treat_bound_eps:post_mid$"
+    )
+  )
+
+  out <- wanted %>%
+    rowwise() %>%
+    mutate(
+      estimate = td$estimate[grepl(term_pattern, td$term)][1],
+      std.error = td$std.error[grepl(term_pattern, td$term)][1],
+      p.value = td$p.value[grepl(term_pattern, td$term)][1]
+    ) %>%
+    ungroup() %>%
+    mutate(
+      stars = case_when(
+        is.na(p.value) ~ "",
+        p.value < 0.01 ~ "***",
+        p.value < 0.05 ~ "**",
+        p.value < 0.10 ~ "*",
+        TRUE ~ ""
+      ),
+      coef_se = ifelse(
+        is.na(estimate),
+        NA_character_,
+        sprintf("%.3f%s\n(%.3f)", estimate, stars, std.error)
+      )
+    ) %>%
+    select(Term, coef_se)
+
+  out
+}
+
+run_one_cluster <- function(cluster_fml, colname, cluster_label){
+  m_bins <- feols(
+    f_bins,
+    data = dat_bins,
+    weights = ~EARNWT_adj,
+    cluster = cluster_fml,
+    lean = TRUE
+  )
+
+  m_tau <- feols(
+    f_tau,
+    data = dat_main_eps,
+    weights = ~EARNWT_adj,
+    cluster = cluster_fml,
+    lean = TRUE
+  )
+
+  p_pre <- get_wald_p(
+    fixest::wald(m_tau, keep = "tau::-(6|5|4|3|2):treat_bound_eps")
+  )
+
+  tab <- extract_bins(m_bins) %>%
+    rename(!!colname := coef_se)
+
+  list(
+    tab = tab,
+    p_pre = p_pre,
+    nobs = broom::glance(m_bins)$nobs,
+    cluster_label = cluster_label
+  )
+}
+
+# -----------------------------
+# Run specifications
+# -----------------------------
+spec_tw <- run_one_cluster(~STATEFIP + event_id, "Baseline (State & Event)", "Two-way: state & event")
+spec_s  <- run_one_cluster(~STATEFIP,            "State only",               "One-way: state")
+spec_e  <- run_one_cluster(~event_id,            "Event only",               "One-way: event")
+
+# -----------------------------
+# Build combined main-results table
+# -----------------------------
+table41_combined <- spec_tw$tab %>%
+  left_join(spec_s$tab, by = "Term") %>%
+  left_join(spec_e$tab, by = "Term") %>%
+  bind_rows(
+    tibble(
+      Term = "Pre-trend Wald p-value (τ = -6 to -2)",
+      `Baseline (State & Event)` = sprintf("%.3f", spec_tw$p_pre),
+      `State only`               = sprintf("%.3f", spec_s$p_pre),
+      `Event only`               = sprintf("%.3f", spec_e$p_pre)
+    ),
+    tibble(
+      Term = "Observations",
+      `Baseline (State & Event)` = format(spec_tw$nobs, big.mark = ","),
+      `State only`               = format(spec_s$nobs, big.mark = ","),
+      `Event only`               = format(spec_e$nobs, big.mark = ",")
+    ),
+    tibble(
+      Term = "Event × State FE",
+      `Baseline (State & Event)` = "Yes",
+      `State only`               = "Yes",
+      `Event only`               = "Yes"
+    ),
+    tibble(
+      Term = "Event × Month FE",
+      `Baseline (State & Event)` = "Yes",
+      `State only`               = "Yes",
+      `Event only`               = "Yes"
+    ),
+    tibble(
+      Term = "Event × Cell FE",
+      `Baseline (State & Event)` = "Yes",
+      `State only`               = "Yes",
+      `Event only`               = "Yes"
+    ),
+    tibble(
+      Term = "Industry / Occupation / Union FE",
+      `Baseline (State & Event)` = "Yes",
+      `State only`               = "Yes",
+      `Event only`               = "Yes"
+    ),
+    tibble(
+      Term = "Clustering",
+      `Baseline (State & Event)` = spec_tw$cluster_label,
+      `State only`               = spec_s$cluster_label,
+      `Event only`               = spec_e$cluster_label
+    )
+  )
+
+gt_table41 <- table41_combined %>%
+  gt() %>%
+  tab_header(title = "Table 4.1 Baseline Bin Estimates and Alternative Clustering Structures") %>%
+  cols_label(
+    Term = "",
+    `Baseline (State & Event)` = "Baseline (State & Event)",
+    `State only` = "State only",
+    `Event only` = "Event only"
+  ) %>%
+  cols_width(
+    Term ~ px(400),
+    `Baseline (State & Event)` ~ px(150),
+    `State only` ~ px(150),
+    `Event only` ~ px(150)
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "pre-line"),
+    locations = cells_body()
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "pre-line"),
+    locations = cells_source_notes()
+  ) %>%
+  tab_options(
+    table.font.size = "small",
+    data_row.padding = px(3),
+    source_notes.font.size = "small"
+  )
+
+gtsave(
+  gt_table41,
+  filename = here("tables", "table41_combined_clustering.png"),
+  vwidth = 1400,
+  vheight = 1000
+)
+
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+dat_bound2b <- readRDS(here("data", "processed", "dat_bound2b.rds"))
+
+# ===== 0) Prepare the data using the same sample definition as in the baseline specification =====
+df <- dat_bound2b %>%
+  mutate(
+    tau  = as.integer(tau),
+    ym   = as.integer(ym),
+    cell = interaction(SEX, EDUC, drop = TRUE)
+  ) %>%
+  filter(tau >= -6, tau <= 12) %>%
+  filter(tau != 0) %>%                 # Drop tau = 0 to match the bin specification
+  filter(!is.na(delta_event))
+
+# ===== 1) Create event-level terciles based on the size of the minimum-wage increase =====
+ev_grp <- df %>%
+  distinct(event_id, delta_event)
+
+q33 <- quantile(ev_grp$delta_event, 1/3, na.rm = TRUE)
+q66 <- quantile(ev_grp$delta_event, 2/3, na.rm = TRUE)
+
+ev_grp <- ev_grp %>%
+  mutate(
+    shock_grp = case_when(
+      delta_event <= q33 ~ "small",
+      delta_event <= q66 ~ "medium",
+      TRUE               ~ "large"
+    )
+  )
+
+df <- df %>%
+  left_join(ev_grp, by = c("event_id", "delta_event"))
+
+# ===== 2) Define post-treatment bins to match the baseline bin specification =====
+df <- df %>%
+  mutate(
+    post_short = as.integer(tau >= 1 & tau <= 6),
+    post_mid   = as.integer(tau >= 7 & tau <= 11)
+  )
+
+# ===== 3) Run subgroup regressions and compute pre-trend tests =====
+fit_bins_and_pre <- function(d){
+  m_bins <- feols(
+    UHRSWORKORG ~
+      post_short:treat_bound_eps + post_mid:treat_bound_eps +
+      post_short:bound_eps + post_mid:bound_eps +
+      AGE + I(AGE^2)
+    | event_id^STATEFIP + event_id^ym + event_id^cell + UNION + OCC2010 + IND,
+    data = d,
+    weights = ~EARNWT_adj,
+    cluster = ~STATEFIP + event_id,
+    lean = TRUE
+  )
+
+  m_pre <- feols(
+    UHRSWORKORG ~ i(tau, bound_eps, ref = -1) + i(tau, treat_bound_eps, ref = -1) + AGE + I(AGE^2)
+    | event_id^STATEFIP + event_id^ym + event_id^cell + UNION + OCC2010 + IND,
+    data = d,
+    weights = ~EARNWT_adj,
+    cluster = ~STATEFIP + event_id,
+    lean = TRUE
+  )
+
+  # Two alternative pre-trend windows
+  w_pre_6_2 <- fixest::wald(m_pre, keep = "tau::-(6|5|4|3|2):treat_bound_eps")
+  w_pre_4_2 <- fixest::wald(m_pre, keep = "tau::-(4|3|2):treat_bound_eps")
+
+  list(
+    m_bins = m_bins,
+    m_pre = m_pre,
+    w_pre_6_2 = w_pre_6_2,
+    w_pre_4_2 = w_pre_4_2
+  )
+}
+
+res_small  <- fit_bins_and_pre(df %>% filter(shock_grp == "small"))
+res_medium <- fit_bins_and_pre(df %>% filter(shock_grp == "medium"))
+res_large  <- fit_bins_and_pre(df %>% filter(shock_grp == "large"))
+
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+ev_grp %>%
+  group_by(shock_grp) %>%
+  summarise(n_events = n())
+
+df %>%
+  group_by(shock_grp) %>%
+  summarise(n_obs = n())
+
+df %>%
+  group_by(shock_grp, event_id) %>%
+  summarise(n_obs_event = n()) %>%
+  group_by(shock_grp) %>%
+  summarise(avg_obs_per_event = mean(n_obs_event))
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Extract and format the two key coefficients from one model
+extract_two_terms <- function(m){
+  broom::tidy(m) %>%
+    filter(term %in% c("post_short:treat_bound_eps", "treat_bound_eps:post_mid")) %>%
+    mutate(
+      Term = case_when(
+        term == "post_short:treat_bound_eps" ~ "Post (1-6) × Treated × Bound",
+        term == "treat_bound_eps:post_mid"   ~ "Post (7-11) × Treated × Bound"
+      ),
+      stars = case_when(
+        p.value < 0.01 ~ "***",
+        p.value < 0.05 ~ "**",
+        p.value < 0.10 ~ "*",
+        TRUE ~ ""
+      ),
+      coef_se = sprintf("%.3f%s\n(%.3f)", estimate, stars, std.error)
+    ) %>%
+    select(Term, coef_se)
+}
+
+t_small  <- extract_two_terms(res_small$m_bins)  %>% rename(Small = coef_se)
+t_medium <- extract_two_terms(res_medium$m_bins) %>% rename(Medium = coef_se)
+t_large  <- extract_two_terms(res_large$m_bins)  %>% rename(Large = coef_se)
+
+# ===== Event counts by tercile =====
+n_events_tbl <- ev_grp %>%
+  count(shock_grp, name = "n_events")
+
+n_events_small  <- n_events_tbl %>% filter(shock_grp == "small")  %>% pull(n_events)
+n_events_medium <- n_events_tbl %>% filter(shock_grp == "medium") %>% pull(n_events)
+n_events_large  <- n_events_tbl %>% filter(shock_grp == "large")  %>% pull(n_events)
+
+tab3 <- t_small %>%
+  left_join(t_medium, by = "Term") %>%
+  left_join(t_large,  by = "Term")
+
+g_small  <- broom::glance(res_small$m_bins)
+g_medium <- broom::glance(res_medium$m_bins)
+g_large  <- broom::glance(res_large$m_bins)
+
+# Pre-trend p-values: the returned field name can vary across Wald objects
+get_p <- function(w){
+  if (!is.null(w$p.value)) return(as.numeric(w$p.value))
+  if (!is.null(w$`p-value`)) return(as.numeric(w$`p-value`))
+  if (!is.null(w$p)) return(as.numeric(w$p))
+  NA_real_
+}
+
+p_small_6_2  <- get_p(res_small$w_pre_6_2)
+p_medium_6_2 <- get_p(res_medium$w_pre_6_2)
+p_large_6_2  <- get_p(res_large$w_pre_6_2)
+
+p_small_4_2  <- get_p(res_small$w_pre_4_2)
+p_medium_4_2 <- get_p(res_medium$w_pre_4_2)
+p_large_4_2  <- get_p(res_large$w_pre_4_2)
+
+tab3 <- tab3 %>%
+  bind_rows(
+    tibble(
+      Term   = "Pre-trend Wald p-value (τ = -6 to -2)",
+      Small  = sprintf("%.3f", p_small_6_2),
+      Medium = sprintf("%.3f", p_medium_6_2),
+      Large  = sprintf("%.3f", p_large_6_2)
+    ),
+    tibble(
+      Term   = "Pre-trend Wald p-value (τ = -4 to -2)",
+      Small  = sprintf("%.3f", p_small_4_2),
+      Medium = sprintf("%.3f", p_medium_4_2),
+      Large  = sprintf("%.3f", p_large_4_2)
+    ),
+    tibble(
+      Term   = "Events",
+      Small  = format(n_events_small, big.mark = ","),
+      Medium = format(n_events_medium, big.mark = ","),
+      Large  = format(n_events_large, big.mark = ",")
+    ),
+    tibble(
+      Term   = "Observations",
+      Small  = format(g_small$nobs, big.mark = ","),
+      Medium = format(g_medium$nobs, big.mark = ","),
+      Large  = format(g_large$nobs, big.mark = ",")
+    ),
+    tibble(
+      Term   = "R-squared",
+      Small  = sprintf("%.3f", g_small$r.squared),
+      Medium = sprintf("%.3f", g_medium$r.squared),
+      Large  = sprintf("%.3f", g_large$r.squared)
+    ),
+    tibble(Term = "Event × State FE", Small = "Yes", Medium = "Yes", Large = "Yes"),
+    tibble(Term = "Event × Month FE", Small = "Yes", Medium = "Yes", Large = "Yes"),
+    tibble(Term = "Event × Cell FE", Small = "Yes", Medium = "Yes", Large = "Yes"),
+    tibble(Term = "Industry / Occupation / Union FE", Small = "Yes", Medium = "Yes", Large = "Yes"),
+    tibble(Term = "Clustered SE", Small = "State & Event", Medium = "State & Event", Large = "State & Event")
+  )
+
+gt_tab3 <- tab3 %>%
+  gt() %>%
+  tab_header(title = "Table 4.3 Heterogeneity by Policy Intensity (Terciles)") %>%
+  cols_label(Term = "", Small = "Small", Medium = "Medium", Large = "Large") %>%
+  cols_width(
+    Term ~ px(400),
+    `Small` ~ px(150),
+    `Medium` ~ px(150),
+    `Large` ~ px(150)
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "pre-line"),
+    locations = cells_source_notes()
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "pre-line"),
+    locations = cells_body(columns = c(Small, Medium, Large))
+  ) %>%
+  tab_options(
+    table.font.size = "small",
+    data_row.padding = px(3),
+    source_notes.font.size = "small"
+  )
+
+gtsave(gt_tab3, here("tables", "table3_shock_terciles.html"))
+saveRDS(gt_tab3, here("tables", "table3_shock_terciles.rds"))
+gtsave(
+  gt_tab3,
+  filename = here::here("tables", "table3_shock_terciles.png"),
+  vwidth = 1400,
+  vheight = 950
+)
+
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+m_dose <- feols(
+  UHRSWORKORG ~ 
+    post_short:treat_bound_eps + post_mid:treat_bound_eps +
+    post_short:treat_bound_eps:delta_event + post_mid:treat_bound_eps:delta_event +
+    post_short:bound_eps + post_mid:bound_eps +
+    AGE + I(AGE^2)
+  | event_id^STATEFIP + event_id^ym + event_id^cell + UNION + OCC2010 + IND,
+  data = df,
+  weights = ~EARNWT_adj,
+  cluster = ~STATEFIP + event_id,
+  lean = TRUE
+)
+
+summary(m_dose)
+
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+m_bins <- feols(
+  UHRSWORKORG ~ 
+    post_short:treat_bound_eps + post_mid:treat_bound_eps +
+    post_short:bound_eps + post_mid:bound_eps +
+    AGE + I(AGE^2)
+  | event_id^STATEFIP + event_id^ym + event_id^cell + UNION + OCC2010 + IND,
+  data = df,
+  weights = ~EARNWT_adj,
+  cluster = ~STATEFIP + event_id,
+  lean = TRUE
+)
+# -----------------------------
+# Helper: add stars and format coefficients
+# -----------------------------
+fmt_coef_se <- function(estimate, std.error, p.value){
+  stars <- dplyr::case_when(
+    is.na(p.value) ~ "",
+    p.value < 0.01 ~ "***",
+    p.value < 0.05 ~ "**",
+    p.value < 0.10 ~ "*",
+    TRUE ~ ""
+  )
+  sprintf("%.3f%s\n(%.3f)", estimate, stars, std.error)
+}
+
+# -----------------------------
+# Extract baseline terms
+# -----------------------------
+tidy_base <- broom::tidy(m_bins)
+
+base_terms <- tibble(
+  Term = c(
+    "Post (1-6) × Treated × Bound",
+    "Post (7-11) × Treated × Bound"
+  ),
+  term_pattern = c(
+    "^post_short:treat_bound_eps$|^treat_bound_eps:post_short$",
+    "^post_mid:treat_bound_eps$|^treat_bound_eps:post_mid$"
+  )
+) %>%
+  rowwise() %>%
+  mutate(
+    estimate  = tidy_base$estimate[grepl(term_pattern, tidy_base$term)][1],
+    std.error = tidy_base$std.error[grepl(term_pattern, tidy_base$term)][1],
+    p.value   = tidy_base$p.value[grepl(term_pattern, tidy_base$term)][1],
+    Baseline  = fmt_coef_se(estimate, std.error, p.value)
+  ) %>%
+  ungroup() %>%
+  select(Term, Baseline)
+
+# -----------------------------
+# Extract dose-response terms
+# -----------------------------
+tidy_dose <- broom::tidy(m_dose)
+
+dose_terms <- tibble(
+  Term = c(
+    "Post (1-6) × Treated × Bound",
+    "Post (7-11) × Treated × Bound",
+    "Post (1-6) × Treated × Bound × ΔMW",
+    "Post (7-11) × Treated × Bound × ΔMW"
+  ),
+  term_pattern = c(
+    "^post_short:treat_bound_eps$|^treat_bound_eps:post_short$",
+    "^post_mid:treat_bound_eps$|^treat_bound_eps:post_mid$",
+    "^post_short:treat_bound_eps:delta_event$|^post_short:delta_event:treat_bound_eps$|^treat_bound_eps:post_short:delta_event$|^treat_bound_eps:delta_event:post_short$|^delta_event:post_short:treat_bound_eps$|^delta_event:treat_bound_eps:post_short$",
+    "^post_mid:treat_bound_eps:delta_event$|^post_mid:delta_event:treat_bound_eps$|^treat_bound_eps:post_mid:delta_event$|^treat_bound_eps:delta_event:post_mid$|^delta_event:post_mid:treat_bound_eps$|^delta_event:treat_bound_eps:post_mid$"
+  )
+) %>%
+  rowwise() %>%
+  mutate(
+    estimate  = tidy_dose$estimate[grepl(term_pattern, tidy_dose$term)][1],
+    std.error = tidy_dose$std.error[grepl(term_pattern, tidy_dose$term)][1],
+    p.value   = tidy_dose$p.value[grepl(term_pattern, tidy_dose$term)][1],
+    `Dose–Response` = ifelse(
+      is.na(estimate),
+      "",
+      fmt_coef_se(estimate, std.error, p.value)
+    )
+  ) %>%
+  ungroup() %>%
+  select(Term, `Dose–Response`)
+
+# -----------------------------
+# Merge the two columns
+# -----------------------------
+table2 <- tibble(
+  Term = c(
+    "Post (1-6) × Treated × Bound",
+    "Post (7-11) × Treated × Bound",
+    "Post (1-6) × Treated × Bound × ΔMW",
+    "Post (7-11) × Treated × Bound × ΔMW"
+  )
+) %>%
+  left_join(base_terms, by = "Term") %>%
+  left_join(dose_terms, by = "Term") %>%
+  mutate(
+    Baseline = ifelse(is.na(Baseline), "-", Baseline)
+  )
+
+# -----------------------------
+# Add summary rows
+# -----------------------------
+ms_base <- broom::glance(m_bins)
+ms_dose <- broom::glance(m_dose)
+
+table2 <- table2 %>%
+  bind_rows(
+    tibble(
+      Term = "Observations",
+      Baseline = format(ms_base$nobs, big.mark = ","),
+      `Dose–Response` = format(ms_dose$nobs, big.mark = ",")
+    ),
+    tibble(
+      Term = "R-squared",
+      Baseline = sprintf("%.3f", ms_base$r.squared),
+      `Dose–Response` = sprintf("%.3f", ms_dose$r.squared)
+    ),
+    tibble(
+      Term = "Event × State FE",
+      Baseline = "Yes",
+      `Dose–Response` = "Yes"
+    ),
+    tibble(
+      Term = "Event × Month FE",
+      Baseline = "Yes",
+      `Dose–Response` = "Yes"
+    ),
+    tibble(
+      Term = "Event × Cell FE",
+      Baseline = "Yes",
+      `Dose–Response` = "Yes"
+    ),
+    tibble(
+      Term = "Industry / Occupation / Union FE",
+      Baseline = "Yes",
+      `Dose–Response` = "Yes"
+    ),
+    tibble(
+      Term = "Clustered SE",
+      Baseline = "State & Event",
+      `Dose–Response` = "State & Event"
+    )
+  )
+
+# -----------------------------
+# GT table
+# -----------------------------
+gt_table2 <- table2 %>%
+  gt() %>%
+  tab_header(title = "Table 4.2 Dose–Response Test: Interaction with Minimum Wage Increase") %>%
+  cols_label(
+    Term = "",
+    Baseline = "Baseline",
+    `Dose–Response` = "Dose–Response"
+  ) %>%
+  cols_width(
+    Term ~ px(400),
+    `Baseline` ~ px(225),
+    `Dose–Response` ~ px(225)
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "pre-line"),
+    locations = cells_body(columns = c(Baseline, `Dose–Response`))
+  ) %>%
+  tab_style(
+    style = cell_text(whitespace = "pre-line"),
+    locations = cells_source_notes()
+  ) %>%
+  tab_options(
+    table.font.size = "small",
+    data_row.padding = px(3),
+    source_notes.font.size = "small"
+  )
+
+gtsave(
+  gt_table2,
+  filename = here("tables", "table2_dose_response_two_cols.png"),
+  vwidth = 1400,
+  vheight = 1000
+)
+
+```
+

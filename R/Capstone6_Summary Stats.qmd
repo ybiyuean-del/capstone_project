@@ -1,0 +1,228 @@
+---
+title: "Capstone6"
+format: html
+---
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Essential libraries
+# install.packages("caret")
+# install.packages("glmnet")
+# install.packages("ranger")
+# install.packages("iml")
+# install.packages("slider")
+# install.packages("kableExtra")
+library(tidyverse)
+library(readxl)
+library(tidyr)
+library(stringr)
+library(lubridate)
+library(janitor)
+library(here)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(arrow)
+library(tidymodels)
+library(yardstick)
+library(purrr)
+library(tibble)
+library(caret)
+library(recipes)
+library(pROC)
+library(ggplot2)
+library(ranger)
+library(iml)
+library(knitr)
+library(slider)
+library(fixest)
+library(kableExtra)
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+dat_main_eps <- readRDS(here("data", "processed", "dat_main_eps.rds"))
+
+# ---------- helper: weighted mean ----------
+wmean <- function(x, w) {
+  ok <- !is.na(x) & !is.na(w)
+  if (!any(ok)) return(NA_real_)
+  weighted.mean(x[ok], w[ok])
+}
+
+# ---------- helper: summary stats function ----------
+make_sumstats <- function(df, wvar = "EARNWT_adj") {
+  w <- df[[wvar]]
+
+  tibble(
+    `Weekly hours` = wmean(df$UHRSWORKORG, w),
+    `Hourly wage`  = wmean(df$HOURWAGE, w),
+    `Age`          = wmean(df$AGE, w),
+    `Share bound`  = wmean(as.numeric(df$bound_eps == 1), w),
+    `Share treated`= wmean(as.numeric(df$treated == 1), w),
+    `N (unweighted)` = nrow(df),
+    `N (weighted)`   = sum(w, na.rm = TRUE)
+  )
+}
+
+# ---------- 0) output folder ----------
+out_dir <- here("tables")
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# ---------- 1) Final sample counts table ----------
+
+final_counts <- dat_main_eps %>%
+  summarise(
+    `Observations (unweighted)` = n(),
+    `Observations (weighted)`   = sum(EARNWT_adj, na.rm = TRUE),
+    `Events`  = n_distinct(event_id),
+    `States`  = n_distinct(STATEFIP),
+    `Treated obs (unweighted)`  = sum(treated == 1, na.rm = TRUE),
+    `Control obs (unweighted)`  = sum(treated == 0, na.rm = TRUE),
+    `Treated obs (weighted)`    = sum(EARNWT_adj[treated == 1], na.rm = TRUE),
+    `Control obs (weighted)`    = sum(EARNWT_adj[treated == 0], na.rm = TRUE)
+  ) %>%
+  t() %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Statistic") %>%
+  rename(Value = V1) %>%
+  mutate(
+    Value = formatC(Value, format = "f", big.mark = ",", digits = 0)
+  )
+
+counts_tex <- final_counts %>%
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    longtable = FALSE,
+    col.names = c("Statistic", "Value"),
+    align = c("l", "r"),
+    caption = "Final Sample Counts"
+  ) %>%
+  kable_styling(
+    latex_options = c("hold_position"),
+    font_size = 10
+  )
+
+save_kable(counts_tex, file = file.path(out_dir, "table_counts.tex"))
+
+# ---------- 2) Table 1: Summary Statistics ----------
+
+# Panel A: full sample only (single row, no extra panel column)
+panelA <- make_sumstats(dat_main_eps) %>%
+  mutate(Group = "Full sample") %>%
+  select(Group, everything())
+
+# Panel B: Bound vs Non-bound
+panelB <- dat_main_eps %>%
+  mutate(Group = ifelse(bound_eps == 1, "Bound", "Non-bound")) %>%
+  group_by(Group) %>%
+  group_modify(~ make_sumstats(.x)) %>%
+  ungroup() %>%
+  select(Group, everything())
+
+# Combine the two panels, keeping Panel A first
+tab1 <- bind_rows(panelA, panelB)
+
+# Round and format numeric values
+tab1_fmt <- tab1 %>%
+  mutate(
+    across(c(`Weekly hours`, `Hourly wage`, `Age`, `Share bound`, `Share treated`),
+           ~ sprintf("%.3f", round(.x, 3))),
+    `N (unweighted)` = formatC(`N (unweighted)`, format = "f", big.mark = ",", digits = 0),
+    `N (weighted)`   = formatC(`N (weighted)`,   format = "f", big.mark = ",", digits = 0)
+  )
+
+# Build the LaTeX table
+tab1_tex <- tab1_fmt %>%
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    longtable = FALSE,
+    align = "lrrrrrrrr",  # 1 Group column plus 7 statistics columns
+    caption = "Summary Statistics",
+    col.names = c("Group", "Weekly hours", "Hourly wage", "Age",
+                  "Share bound", "Share treated",
+                  "N (unweighted)", "N (weighted)")
+  ) %>%
+  kable_styling(
+    latex_options = c("hold_position", "scale_down"),
+    font_size = 9
+  ) %>%
+  pack_rows("Panel A: Full sample", 1, 1, bold = TRUE) %>%
+  pack_rows("Panel B: By bound status", 2, nrow(tab1_fmt), bold = TRUE)
+
+save_kable(tab1_tex, file = file.path(out_dir, "table1_sumstats.tex"))
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+dat_main_eps <- readRDS(here("data", "processed", "dat_main_eps.rds"))
+
+# Update these if your actual variable names differ
+pre_wage_var <- "w_pre"     # Replace if the pre-policy wage variable has a different name
+mw_base_var  <- "mw_base"   # Replace if the baseline minimum-wage variable has a different name
+
+plot_df <- dat_main_eps %>%
+  filter(
+    !is.na(.data[[pre_wage_var]]),
+    !is.na(.data[[mw_base_var]]),
+    !is.na(bound_eps),
+    !is.na(EARNWT_adj)
+  ) %>%
+  mutate(
+    wage_gap = .data[[pre_wage_var]] - .data[[mw_base_var]],
+    bound_label = if_else(bound_eps == 1, "Bound", "Non-bound")
+  )
+
+p_wage_dist <- ggplot(plot_df, aes(x = wage_gap, weight = EARNWT_adj, fill = bound_label)) +
+  geom_histogram(
+    aes(y = after_stat(density)),
+    bins = 60,
+    position = "identity",
+    alpha = 0.6,
+    color = NA
+  ) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    x = "Pre-policy wage relative to baseline minimum wage (US dollars)",
+    y = "Weighted density",
+    title = "Distribution of pre-policy wages by bound status",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 11)
+
+p_wage_dist
+
+ggsave(
+  here("tables", "fig_wage_distribution_bound_status.png"),
+  p_wage_dist,
+  width = 8, height = 5.5, dpi = 300
+)
+
+p_wage_density <- ggplot(plot_df, aes(x = wage_gap, weight = EARNWT_adj, fill = bound_label)) +
+  geom_density(alpha = 0.35, adjust = 1.1) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(
+    x = "Pre-policy wage relative to baseline minimum wage (US dollars)",
+    y = "Weighted density",
+    title = "Pre-Policy Wage Distribution and Bound Classification",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 11)
+
+p_wage_density
+
+ggsave(
+  here("tables", "fig_wage_density_bound_status.png"),
+  p_wage_density,
+  width = 8, height = 5.5, dpi = 300
+)
+```
+
+
+
+
+
+
+

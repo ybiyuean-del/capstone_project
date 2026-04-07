@@ -1,0 +1,452 @@
+---
+title: "Capstone"
+format: html
+---
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+# Essential libraries
+# install.packages("caret")
+# install.packages("glmnet")
+# install.packages("ranger")
+# install.packages("randomForest")
+# install.packages("xgboost")
+# install.packages("iml")
+# install.packages("slider")
+library(tidyverse)
+library(readxl)
+library(tidyr)
+library(stringr)
+library(lubridate)
+library(janitor)
+library(here)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(arrow)
+library(tidymodels)
+library(yardstick)
+library(purrr)
+library(tibble)
+library(rsample)   # group_initial_split
+library(caret)
+library(recipes)
+library(glmnet)
+library(pROC)
+library(ggplot2)
+library(ranger)
+library(sf) #to perform spatial joins and cnonect longlats with county information.
+library(tigris) #to pull US census and county data
+library(iml)
+library(knitr)
+library(slider)
+# install.packages("ipumsr")   # Install if needed
+library(ipumsr)
+library(fixest)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+library(data.table)
+# install.packages('R.utils')
+data <- fread(here("data", "raw", "cps_00001.csv.gz"))
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+analysis <- data[
+  PAIDHOUR == 2 &              # Paid hourly
+  UHRSWORKORG < 999
+]
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+state_raw <- read_excel(
+  here("data", "raw", "mw_state_monthly.xlsx")
+)
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+state_mw <- state_raw %>%
+  mutate(
+    year  = as.integer(str_extract(`Monthly Date`, "^\\d{4}")),
+    month = as.integer(str_extract(`Monthly Date`, "(?<=m)\\d+"))
+  )
+
+state_mw <- state_mw %>%
+  filter(year >= 2010, year <= 2019)
+
+state_mw <- state_mw %>%
+  mutate(
+    # Use the higher of the federal and state minimum wage as the effective minimum wage
+    mw_effective = pmax(`Monthly Federal Minimum`, `Monthly State Minimum`, na.rm = TRUE),
+    mw_effective = ifelse(is.infinite(mw_effective), NA_real_, mw_effective)
+  )
+
+state_mw_clean <- state_mw %>%
+  select(
+    STATEFIP = `State FIPS Code`,
+    year,
+    month,
+    mw_effective
+  )
+
+analysis <- analysis %>%
+  left_join(
+    state_mw_clean,
+    by = c("STATEFIP" = "STATEFIP",
+           "YEAR"     = "year",
+           "MONTH"    = "month")
+  )
+
+# Quick data-quality checks for the minimum-wage panel
+state_mw %>%
+  summarise(
+    n = n(),
+    n_all_na = sum(is.na(`Monthly Federal Minimum`) & is.na(`Monthly State Minimum`)),
+    n_mw_neg_inf = sum(is.infinite(mw_effective) & mw_effective < 0)
+  )
+
+# (a) Check whether the state-month key is unique in the minimum-wage table
+state_mw_clean %>%
+  count(STATEFIP, year, month) %>%
+  filter(n > 1) %>%
+  arrange(desc(n)) %>%
+  head(20)
+
+# (b) Identify state-months in CPS that are missing from the minimum-wage table
+analysis %>%
+  distinct(STATEFIP, YEAR, MONTH) %>%
+  anti_join(state_mw_clean, by = c("STATEFIP"="STATEFIP","YEAR"="year","MONTH"="month")) %>%
+  head(30)
+
+# (c) Inspect the share of missing effective minimum wage after the join, by state
+analysis %>%
+  group_by(STATEFIP) %>%
+  summarise(
+    n = n(),
+    share_mw_na = mean(is.na(mw_effective))
+  ) %>%
+  arrange(desc(share_mw_na)) %>%
+  head(20)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+analysis %>%
+  summarise(
+    share_missing_mw = mean(is.na(mw_effective))
+  )
+analysis %>%
+  group_by(STATEFIP, YEAR) %>%
+  summarise(n_mw = n_distinct(mw_effective)) %>%
+  summarise(max(n_mw))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+analysis <- analysis %>%
+  mutate(
+    wage_gap = HOURWAGE - mw_effective
+  )
+
+analysis <- analysis %>%
+  mutate(
+    wage_ratio = HOURWAGE / mw_effective
+  )
+
+analysis <- analysis %>%
+  mutate(
+    wage_bin = case_when(
+      wage_ratio < 1.00                         ~ "Below MW",
+      wage_ratio >= 1.00 & wage_ratio < 1.10   ~ "MW to 10% above",
+      wage_ratio >= 1.10 & wage_ratio < 1.25   ~ "10% to 25% above",
+      wage_ratio >= 1.25 & wage_ratio < 1.50   ~ "25% to 50% above",
+      TRUE                                      ~ "50%+ above"
+    )
+  )
+
+# Check missingness and infinite values in wage measures
+analysis %>%
+  summarise(
+    share_hourwage_na = mean(is.na(HOURWAGE)),
+    share_mw_na       = mean(is.na(mw_effective)),
+    share_ratio_na    = mean(is.na(wage_ratio)),
+    share_ratio_inf   = mean(is.infinite(wage_ratio))
+  )
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+
+# ===== 0) Restrict to 2010-2019 and sort the minimum-wage panel by state-month =====
+mw_panel <- state_mw_clean %>%
+  filter(year >= 2010, year <= 2019) %>%
+  arrange(STATEFIP, year, month) %>%
+  group_by(STATEFIP) %>%
+  mutate(
+    mw_lag  = lag(mw_effective),
+    d_mw    = mw_effective - mw_lag,
+    pct_chg = (mw_effective / mw_lag) - 1
+  ) %>%
+  ungroup()
+
+# Summary counts of state-months and minimum-wage increase events
+mw_panel %>%
+  summarise(
+    n_state_month = n(),
+    n_raise_month = sum(d_mw > 0, na.rm = TRUE),
+    n_states_with_raise = n_distinct(STATEFIP[d_mw > 0])
+  )
+
+mw_panel %>%
+  filter(d_mw > 0) %>%
+  count(STATEFIP, sort = TRUE) %>%
+  head(20)
+
+# Optional: inspect pct_chg for extreme values or missingness
+summary(mw_panel$pct_chg)
+
+# ===== 1) Count ΔMW > 0 events and >5% increases by state =====
+mw_counts_by_state <- mw_panel %>%
+  filter(!is.na(mw_lag)) %>%  # The first observation within each state has no lag
+  group_by(STATEFIP) %>%
+  summarise(
+    n_pos_change = sum(d_mw > 0, na.rm = TRUE),        # Number of increases of any size
+    n_gt5_change = sum(pct_chg > 0.05, na.rm = TRUE),  # Number of increases above 5%
+    n_any_change = sum(d_mw != 0, na.rm = TRUE),       # Number of nonzero changes, including decreases
+    .groups = "drop"
+  )
+
+# ===== 2) Distribution of increase counts: any increase and >5% increases =====
+dist_pos <- mw_counts_by_state %>%
+  count(n_pos_change, name = "num_states") %>%
+  arrange(n_pos_change)
+
+dist_gt5 <- mw_counts_by_state %>%
+  count(n_gt5_change, name = "num_states") %>%
+  arrange(n_gt5_change)
+
+cat("\n=== Distribution: number of months with ΔMW > 0 (2010-2019) ===\n")
+print(dist_pos, n = Inf)
+
+cat("\n=== Distribution: number of months with percentage change > 5% (2010-2019) ===\n")
+print(dist_gt5, n = Inf)
+
+# ===== 3) States with only small increases and no >5% events =====
+states_only_small <- mw_counts_by_state %>%
+  filter(n_pos_change > 0, n_gt5_change == 0) %>%
+  arrange(desc(n_pos_change))
+
+cat("\n=== States with at least one increase but NO increase above 5% ===\n")
+cat("Count of such states:", nrow(states_only_small), "\n")
+print(states_only_small, n = Inf)
+
+# Optional: states with no increases at all, as a sanity check
+states_never_increase <- mw_counts_by_state %>%
+  filter(n_pos_change == 0)
+
+cat("\n=== States with ZERO increases (2010-2019) ===\n")
+cat("Count of such states:", nrow(states_never_increase), "\n")
+print(states_never_increase, n = Inf)
+
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+write_rds(mw_panel, here("data", "processed", "mw_panel.rds"))
+
+# mw_panel already contains mw_effective, mw_lag, d_mw, and pct_chg
+events <- mw_panel %>%
+  filter(!is.na(mw_lag), d_mw > 0) %>%
+  transmute(
+    STATEFIP,
+    year,
+    month,
+    Te = sprintf("%04d-%02d", year, month),
+    event_id = paste0(sprintf("%02d", STATEFIP), "_", Te),  # Stable event identifier
+    delta_pct = pct_chg,
+    delta_log = log(mw_effective) - log(mw_lag)
+  )
+
+# Check how many events each state experiences
+events_by_state <- events %>%
+  count(STATEFIP, name = "n_events") %>%
+  arrange(desc(n_events))
+
+summary(events_by_state$n_events)
+head(events_by_state, 10)
+
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+mw_changes <- mw_panel %>%
+  filter(!is.na(mw_lag)) %>%
+  transmute(
+    STATEFIP,
+    year,
+    month,
+    change_flag = as.integer(d_mw > 0)
+  )
+
+events2 <- events %>%
+  mutate(Te_date = as.Date(sprintf("%04d-%02d-01", year, month))) %>%
+  group_by(STATEFIP) %>%
+  arrange(Te_date) %>%
+  mutate(
+    prev_Te_date = lag(Te_date),
+    next_Te_date = lead(Te_date)
+  ) %>%
+  ungroup()
+
+event_window <- events2 %>%
+  select(
+    event_id,
+    treated_state = STATEFIP,
+    Te_date,
+    prev_Te_date,
+    next_Te_date,
+    delta_pct,
+    delta_log
+  ) %>%
+  tidyr::expand_grid(tau = -12:12) %>%
+  mutate(
+    cal_date = Te_date %m+% months(tau),
+    year = year(cal_date),
+    month = month(cal_date)
+  ) %>%
+  # Truncate each event window at the previous and next minimum-wage increases
+  filter(
+    (is.na(prev_Te_date) | cal_date > prev_Te_date) &
+    (is.na(next_Te_date) | cal_date < next_Te_date)
+  ) %>%
+  select(event_id, treated_state, Te_date, tau, year, month, delta_pct, delta_log)
+
+states_all <- mw_panel %>%
+  distinct(STATEFIP)
+
+event_state_month <- event_window %>%
+  crossing(states_all) %>%
+  left_join(mw_changes, by = c("STATEFIP", "year", "month")) %>%
+  mutate(change_flag = ifelse(is.na(change_flag), 0L, change_flag))
+
+elig_states <- event_state_month %>%
+  group_by(event_id, STATEFIP, treated_state) %>%
+  summarise(
+    any_increase_in_window = any(change_flag == 1),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    is_treated_state = (STATEFIP == treated_state),
+    # Always keep the treated state because the event window has already been trimmed
+    # Control states must have no minimum-wage increases anywhere within the same window
+    eligible = is_treated_state | (!is_treated_state & !any_increase_in_window)
+  ) %>%
+  filter(eligible) %>%
+  select(event_id, STATEFIP)
+
+stacked_state_month_clean <- event_state_month %>%
+  inner_join(elig_states, by = c("event_id", "STATEFIP")) %>%
+  mutate(treated = as.integer(STATEFIP == treated_state)) %>%
+  select(
+    event_id, STATEFIP, year, month, tau, treated_state, treated,
+    delta_pct, delta_log
+  )
+
+# Basic checks on the stacked state-month panel
+stacked_state_month_clean %>%
+  summarise(
+    n_rows = n(),
+    n_events = n_distinct(event_id),
+    n_events_with_treated = n_distinct(event_id[treated == 1])
+  )
+
+write_rds(
+  stacked_state_month_clean,
+  here("data", "processed", "stacked_state_month_clean.rds")
+)
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+mw_base <- stacked_state_month_clean %>%
+  filter(tau >= -3, tau <= -1) %>%
+  left_join(
+    mw_panel %>% select(STATEFIP, year, month, mw_effective),
+    by = c("STATEFIP", "year", "month")
+  ) %>%
+  group_by(event_id, STATEFIP) %>%
+  summarise(
+    mw_base = mean(mw_effective, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+stacked_micro0 <- analysis %>%
+  inner_join(
+    stacked_state_month_clean,
+    by = c("STATEFIP", "YEAR" = "year", "MONTH" = "month")
+  ) %>%
+  mutate(
+    ym = YEAR * 100 + MONTH,
+    tau = as.integer(tau),
+    treated = as.integer(treated)
+  ) %>%
+  left_join(mw_base, by = c("event_id", "STATEFIP")) %>%
+  filter(!is.na(mw_base), !is.na(HOURWAGE), HOURWAGE > 0)
+
+# Trim the sample using the pre-period minimum wage so the threshold does not shift at tau = 0
+stacked_micro_clean <- stacked_micro0 %>%
+  mutate(ratio_base = HOURWAGE / mw_base) %>%
+  filter(ratio_base >= 0.75, ratio_base <= 1.50)
+
+write_rds(stacked_micro_clean, here("data", "processed", "stacked_micro_clean.rds"))
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+# 0) Start from the stacked micro data before applying the near-worker restriction
+rep_ct <- stacked_state_month_clean %>%
+  filter(tau >= -12, tau <= 12) %>%
+  distinct(event_id, STATEFIP, year, month) %>%
+  count(STATEFIP, year, month, name = "rep")
+
+dat_main0 <- stacked_micro_clean %>%
+  left_join(rep_ct, by = c("STATEFIP", "YEAR" = "year", "MONTH" = "month")) %>%
+  mutate(
+    rep = ifelse(is.na(rep), 1L, rep),
+    EARNWT_adj = EARNWT / rep
+  ) %>%
+  filter(tau >= -12, tau <= 12)
+
+write_rds(dat_main0, here("data", "processed", "dat_main0.rds"))
+
+# 1) Compute pre-policy cell-level wages using observations with tau <= -1
+cell_vars <- c("event_id", "STATEFIP", "OCC2010", "IND", "EDUC", "SEX")  # Keep the cell definition relatively coarse
+
+cell_pre <- dat_main0 %>%
+  filter(tau >= -12, tau <= -1) %>%
+  group_by(across(all_of(cell_vars))) %>%
+  summarise(
+    w_pre = weighted.mean(HOURWAGE, EARNWT_adj, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2) Define the predetermined near-worker sample based on pre-policy cell wages
+dat_cell <- dat_main0 %>%
+  left_join(cell_pre, by = cell_vars) %>%
+  mutate(
+    ratio_pre = w_pre / mw_base,
+    near_cell = !is.na(ratio_pre) & ratio_pre >= 0.8 & ratio_pre <= 1.2
+  )
+
+dat_cell_near <- dat_cell %>%
+  filter(near_cell) %>%
+  group_by(event_id) %>%
+  filter(
+    any(treated == 1) &
+    any(treated == 1 & tau <= -1) &
+    any(treated == 1 & tau >= 0)
+  ) %>%
+  ungroup()
+
+write_rds(dat_cell_near, here("data", "processed", "dat_cell_near.rds"))
+
+```
+
