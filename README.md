@@ -94,6 +94,6 @@ Vaghul, K., & Zipperer, B. (2019). *Historical state and sub-state minimum wages
 
 ## Reproducibility Notes
 
-- Open the project from `Capstone Paper.Rproj` so that `here()` resolves file paths correctly.
+- Open the project from `minimum-wage-hours-study.Rproj` so that `here()` resolves file paths correctly.
 - Most outputs used in the paper are generated into `tables/` and then imported into the final paper `.qmd`.
 - The final paper can be rendered after the analysis scripts have generated the required tables and figures.
