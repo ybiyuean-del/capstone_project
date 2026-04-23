@@ -42,7 +42,7 @@ Using CPS ORG microdata from IPUMS CPS and a stacked event-study design, the pro
   - Runs robustness checks using alternative bound definitions and control sets.
   - Produces appendix support tables and robustness figures.
 
-- `R/Capstone_paper_yanbiyue_A69032912.qmd`
+- `R/minimum-wage-hours-study_yanbiyue.qmd`
   - Assembles the final paper using the saved outputs in `tables/`.
 
 ## Recommended Run Order
@@ -53,7 +53,7 @@ To reproduce the project from scratch, run the files in the following order:
 2. `R/02_Main estimations.qmd`
 3. `R/02.5_Summary Stats.qmd`
 4. `R/03_Robustness.qmd`
-5. `R/Capstone_paper_yanbiyue_A69032912.qmd`
+5. `R/minimum-wage-hours-study_yanbiyue.qmd`
 
 ## Why `02.5` Comes After `02`
 
@@ -91,6 +91,46 @@ Expected raw inputs:
 Suggested data citation:
 
 Vaghul, K., & Zipperer, B. (2019). *Historical state and sub-state minimum wages* (Version 1.2.0) [Data set]. [https://github.com/benzipperer/historicalminwage/releases/tag/v1.2.0](https://github.com/benzipperer/historicalminwage/releases/tag/v1.2.0)
+
+## Required R Packages
+
+The Quarto files load packages directly at the top of each script. For a full run of the project, the main packages used across the workflow are:
+
+- `arrow`
+- `broom`
+- `caret`
+- `data.table`
+- `dplyr`
+- `fixest`
+- `ggplot2`
+- `glmnet`
+- `gt`
+- `here`
+- `iml`
+- `ipumsr`
+- `janitor`
+- `kableExtra`
+- `knitr`
+- `lubridate`
+- `pROC`
+- `purrr`
+- `ranger`
+- `readxl`
+- `recipes`
+- `rsample`
+- `sf`
+- `slider`
+- `stringr`
+- `tibble`
+- `tidymodels`
+- `tidyr`
+- `tigris`
+- `tidyverse`
+- `yardstick`
+- `randomForest`
+- `xgboost`
+
+Depending on your local R setup, some spatial or machine-learning packages may require additional system dependencies. The core analysis workflow mainly relies on the data wrangling, estimation, table, and plotting packages listed above.
 
 ## Reproducibility Notes
 
