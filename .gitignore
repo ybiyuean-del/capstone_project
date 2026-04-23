@@ -7,6 +7,7 @@ Literature Review/
 
 data/processed/
 data/raw/cps_00001.csv.gz
+R/minimum-wage-hours-study_yanbiyue.qmd
 
 *.html
 *.rds

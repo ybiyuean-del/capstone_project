@@ -42,8 +42,8 @@ Using CPS ORG microdata from IPUMS CPS and a stacked event-study design, the pro
   - Runs robustness checks using alternative bound definitions and control sets.
   - Produces appendix support tables and robustness figures.
 
-- `R/minimum-wage-hours-study_yanbiyue.qmd`
-  - Assembles the final paper using the saved outputs in `tables/`.
+- `minimum-wage-hours-study_yanbiyue.pdf`
+  - Final rendered paper for easy viewing.
 
 ## Recommended Run Order
 
@@ -53,8 +53,6 @@ To reproduce the project from scratch, run the files in the following order:
 2. `R/02_Main estimations.qmd`
 3. `R/02.5_Summary Stats.qmd`
 4. `R/03_Robustness.qmd`
-5. `R/minimum-wage-hours-study_yanbiyue.qmd`
-
 ## Why `02.5` Comes After `02`
 
 The numbering is slightly awkward, but the dependency order is intentional.
@@ -113,5 +111,5 @@ This list reflects the cleaned package imports used in the current scripts rathe
 ## Reproducibility Notes
 
 - Open the project from `minimum-wage-hours-study.Rproj` so that `here()` resolves file paths correctly.
-- Most outputs used in the paper are generated into `tables/` and then imported into the final paper `.qmd`.
-- The final paper can be rendered after the analysis scripts have generated the required tables and figures.
+- Most outputs used in the paper are generated into `tables/`.
+- The repository includes the final rendered PDF paper for viewing.
