@@ -27,15 +27,10 @@ library(tidymodels)
 library(yardstick)
 library(purrr)
 library(tibble)
-library(rsample)   # group_initial_split
 library(caret)
-library(recipes)
-library(glmnet)
 library(pROC)
 library(ggplot2)
 library(ranger)
-library(sf) #to perform spatial joins and cnonect longlats with county information.
-library(tigris) #to pull US census and county data
 library(iml)
 library(knitr)
 library(slider)

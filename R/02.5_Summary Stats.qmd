@@ -157,7 +157,7 @@ save_kable(tab1_tex, file = file.path(out_dir, "table1_sumstats.tex"))
 ```
 
 ```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
-dat_main_eps <- readRDS(here("data", "processed", "dat_main_eps.rds"))
+#dat_main_eps <- readRDS(here("data", "processed", "dat_main_eps.rds"))
 
 # Update these if your actual variable names differ
 pre_wage_var <- "w_pre"     # Replace if the pre-policy wage variable has a different name

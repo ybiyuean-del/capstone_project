@@ -25,12 +25,11 @@ library(lubridate)
 library(arrow)
 library(tidymodels)
 library(yardstick)
-library(purrr)
+
 library(tibble)
-library(rsample)   # group_initial_split
+
 library(caret)
-library(recipes)
-library(glmnet)
+
 library(pROC)
 library(ggplot2)
 library(ranger)
@@ -915,6 +914,252 @@ gtsave(
   vwidth = 1400,
   vheight = 1000
 )
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+dat_bound2b <- readRDS(here("data", "processed", "dat_bound2b.rds"))
+
+
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+# ===== 0) Prepare the analysis sample (matching the main specification) =====
+df <- dat_bound2b %>%
+  mutate(
+    tau  = as.integer(tau),
+    ym   = as.integer(ym),
+    cell = interaction(SEX, EDUC, drop = TRUE),
+    post_short = as.integer(tau >= 1 & tau <= 6),
+    post_mid   = as.integer(tau >= 7 & tau <= 11)
+  ) %>%
+  filter(tau >= -6, tau <= 12) %>%
+  filter(tau != 0) %>%
+  filter(!is.na(delta_event))
+
+# Keep the descriptive mean aligned with the regression sample
+df_mean <- df %>%
+  filter(!is.na(UHRSWORKORG))
+
+mean_hours <- with(
+  df_mean,
+  weighted.mean(UHRSWORKORG, w = EARNWT_adj, na.rm = TRUE)
+)
+
+mean_hours
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+# ===== 1) Event-level minimum-wage shock table =====
+ev_shock <- df %>%
+  distinct(event_id, delta_event)
+
+# ===== 2) Build event-specific post-period treatment variables =====
+df_es <- df %>%
+  mutate(
+    tb_postmid   = treat_bound_eps * post_mid,
+    tb_postshort = treat_bound_eps * post_short
+  )
+
+# ===== 3) Estimate event-specific treated × bound effects =====
+m_ev <- feols(
+  UHRSWORKORG ~
+    post_short:bound_eps + post_mid:bound_eps +
+    AGE + I(AGE^2) +
+    i(event_id, tb_postmid) +
+    i(event_id, tb_postshort)
+  | event_id^STATEFIP + event_id^ym + event_id^cell + UNION + OCC2010 + IND,
+  data = df_es,
+  weights = ~EARNWT_adj,
+  cluster = ~STATEFIP + event_id,
+  lean = TRUE
+)
+
+# ===== 4) Extract event-specific post-mid coefficients =====
+ct <- as.data.frame(coeftable(m_ev)) %>%
+  tibble::rownames_to_column("term") %>%
+  filter(str_detect(term, "tb_postmid")) %>%
+  mutate(
+    event_id = str_match(term, "^event_id::(.+):tb_postmid$")[, 2],
+    beta_mid = Estimate,
+    se_mid   = `Std. Error`
+  ) %>%
+  select(event_id, beta_mid, se_mid) %>%
+  left_join(ev_shock, by = "event_id")
+
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+# ===== 5) Create bins for delta_event =====
+n_bins <- 10
+
+ct_bin <- ct %>%
+  filter(!is.na(delta_event), !is.na(beta_mid)) %>%
+  mutate(bin = ntile(delta_event, n_bins)) %>%
+  group_by(bin) %>%
+  summarise(
+    x_mid  = mean(delta_event, na.rm = TRUE),
+    y_mean = mean(beta_mid, na.rm = TRUE),
+    y_se   = sd(beta_mid, na.rm = TRUE) / sqrt(n()),
+    n      = n(),
+    .groups = "drop"
+  )
+
+# ===== 6) Final plot: raw event-level scatter + binned means =====
+p_event_final <- ggplot() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 1, linetype = "dotted") +
+  annotate(
+    "text",
+    x = 1, y = Inf,
+    label = "Delta MW = $1",
+    vjust = 1.2, hjust = -0.1, size = 3
+  ) +
+  geom_point(
+    data = ct,
+    aes(x = delta_event, y = beta_mid),
+    alpha = 0.25, size = 1.3
+  ) +
+  geom_errorbar(
+    data = ct_bin,
+    aes(
+      x = x_mid, y = y_mean,
+      ymin = y_mean - 1.96 * y_se,
+      ymax = y_mean + 1.96 * y_se
+    ),
+    width = 0.03
+  ) +
+  geom_point(
+    data = ct_bin,
+    aes(x = x_mid, y = y_mean),
+    size = 2.3
+  ) +
+  geom_line(
+    data = ct_bin,
+    aes(x = x_mid, y = y_mean)
+  ) +
+  labs(
+    x = "Minimum-wage increase size, Delta MW (US dollars)",
+    y = "Average event-specific post-mid effect on usual weekly hours",
+    title = "Event-specific effects by minimum-wage increase size"
+  ) +
+  theme_minimal(base_size = 11) +
+  coord_cartesian(ylim = c(-5, 5))
+
+dir.create(here("tables"), showWarnings = FALSE, recursive = TRUE)
+
+ggsave(
+  filename = here("tables", "fig_event_specific_postmid_vs_deltaMW_final.png"),
+  plot = p_event_final,
+  width = 7.5, height = 6.5, dpi = 300
+)
+
+p_event_final
+
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
+
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+# ---------- Appendix Table C: Event support for event-specific post-mid estimates ----------
+
+out_dir <- here("tables")
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# 1) All original events, grouped into terciles
+all_events_tbl <- ev_shock %>%
+  mutate(
+    shock_grp = case_when(
+      delta_event <= q33 ~ "Small",
+      delta_event <= q66 ~ "Medium",
+      TRUE ~ "Large"
+    )
+  ) %>%
+  distinct(event_id, shock_grp)
+
+
+# 2) Events for which the event-specific post-mid effect is successfully estimated
+est_events_tbl <- ct %>%
+  mutate(
+    shock_grp = case_when(
+      delta_event <= q33 ~ "Small",
+      delta_event <= q66 ~ "Medium",
+      TRUE ~ "Large"
+    )
+  ) %>%
+  distinct(event_id, shock_grp)
+
+# 3) Flag dropped events
+drop_tbl <- all_events_tbl %>%
+  mutate(estimated = event_id %in% est_events_tbl$event_id) %>%
+  group_by(shock_grp) %>%
+  summarise(
+    Total_events = n(),
+    Estimated_events = sum(estimated),
+    Dropped_events = sum(!estimated),
+    Drop_share_num = Dropped_events / Total_events,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    shock_grp = factor(shock_grp, levels = c("Small", "Medium", "Large")),
+    Drop_share = sprintf("%.1f\\%%", 100 * Drop_share_num)
+  ) %>%
+  arrange(shock_grp) %>%
+  select(-Drop_share_num)
+
+# 4) Add a total row
+drop_tbl_total <- all_events_tbl %>%
+  mutate(estimated = event_id %in% est_events_tbl$event_id) %>%
+  summarise(
+    shock_grp = "Total",
+    Total_events = n(),
+    Estimated_events = sum(estimated),
+    Dropped_events = sum(!estimated),
+    Drop_share = sprintf("%.1f\\%%", 100 * Dropped_events / Total_events)
+  )
+
+# 5) Output the table
+drop_tbl_out <- bind_rows(drop_tbl, drop_tbl_total) %>%
+  mutate(shock_grp = as.character(shock_grp)) %>%
+  rename(
+    `Policy intensity group` = shock_grp,
+    `Total events` = Total_events,
+    `Events with estimated post-mid effect` = Estimated_events,
+    `Dropped events` = Dropped_events,
+    `Dropped share` = Drop_share
+  )
+
+drop_tex <- drop_tbl_out %>%
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    longtable = FALSE,
+    align = c("l", "c", "c", "c", "c"),
+    caption = "Appendix Table C. Event support for event-specific post-mid estimates",
+    col.names = c(
+      "Policy intensity group",
+      "Total events",
+      "Events with estimated post-mid effect",
+      "Dropped events",
+      "Dropped share"
+    ),
+    escape = FALSE
+  ) %>%
+  kable_styling(
+    latex_options = c("hold_position", "scale_down"),
+    font_size = 9
+  )
+
+save_kable(drop_tex, file = file.path(out_dir, "appendix_event_drop_support.tex"))
+
 
 ```
 

@@ -29,9 +29,6 @@ library(purrr)
 library(tibble)
 library(rsample)   # group_initial_split
 library(caret)
-library(recipes)
-library(glmnet)
-library(pROC)
 library(ggplot2)
 library(ranger)
 library(iml)
@@ -681,105 +678,6 @@ shock_examples
 
 
 ```
-
-
-```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
-
-library(dplyr)
-library(knitr)
-library(kableExtra)
-
-# ---------- Appendix Table C: Event support for event-specific post-mid estimates ----------
-
-out_dir <- here("tables")
-dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
-
-# 1) All original events, grouped into terciles
-all_events_tbl <- ev_shock %>%
-  mutate(
-    shock_grp = case_when(
-      delta_event <= q33 ~ "Small",
-      delta_event <= q66 ~ "Medium",
-      TRUE ~ "Large"
-    )
-  ) %>%
-  distinct(event_id, shock_grp)
-
-# 2) Events for which the event-specific post-mid effect is successfully estimated
-est_events_tbl <- ct %>%
-  mutate(
-    shock_grp = case_when(
-      delta_event <= q33 ~ "Small",
-      delta_event <= q66 ~ "Medium",
-      TRUE ~ "Large"
-    )
-  ) %>%
-  distinct(event_id, shock_grp)
-
-# 3) Flag dropped events
-drop_tbl <- all_events_tbl %>%
-  mutate(estimated = event_id %in% est_events_tbl$event_id) %>%
-  group_by(shock_grp) %>%
-  summarise(
-    Total_events = n(),
-    Estimated_events = sum(estimated),
-    Dropped_events = sum(!estimated),
-    Drop_share_num = Dropped_events / Total_events,
-    .groups = "drop"
-  ) %>%
-  mutate(
-    shock_grp = factor(shock_grp, levels = c("Small", "Medium", "Large")),
-    Drop_share = sprintf("%.1f\\%%", 100 * Drop_share_num)
-  ) %>%
-  arrange(shock_grp) %>%
-  select(-Drop_share_num)
-
-# 4) Add a total row
-drop_tbl_total <- all_events_tbl %>%
-  mutate(estimated = event_id %in% est_events_tbl$event_id) %>%
-  summarise(
-    shock_grp = "Total",
-    Total_events = n(),
-    Estimated_events = sum(estimated),
-    Dropped_events = sum(!estimated),
-    Drop_share = sprintf("%.1f\\%%", 100 * Dropped_events / Total_events)
-  )
-
-# 5) Output the table
-drop_tbl_out <- bind_rows(drop_tbl, drop_tbl_total) %>%
-  mutate(shock_grp = as.character(shock_grp)) %>%
-  rename(
-    `Policy intensity group` = shock_grp,
-    `Total events` = Total_events,
-    `Events with estimated post-mid effect` = Estimated_events,
-    `Dropped events` = Dropped_events,
-    `Dropped share` = Drop_share
-  )
-
-drop_tex <- drop_tbl_out %>%
-  kable(
-    format = "latex",
-    booktabs = TRUE,
-    longtable = FALSE,
-    align = c("l", "c", "c", "c", "c"),
-    caption = "Appendix Table C. Event support for event-specific post-mid estimates",
-    col.names = c(
-      "Policy intensity group",
-      "Total events",
-      "Events with estimated post-mid effect",
-      "Dropped events",
-      "Dropped share"
-    ),
-    escape = FALSE
-  ) %>%
-  kable_styling(
-    latex_options = c("hold_position", "scale_down"),
-    font_size = 9
-  )
-
-save_kable(drop_tex, file = file.path(out_dir, "appendix_event_drop_support.tex"))
-```
-
 
 
 
