@@ -4,42 +4,17 @@ format: html
 ---
 
 ```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
-# Essential libraries
-# install.packages("caret")
-# install.packages("glmnet")
-# install.packages("ranger")
-# install.packages("randomForest")
-# install.packages("xgboost")
-# install.packages("iml")
-# install.packages("slider")
+
 library(tidyverse)
 library(readxl)
-library(tidyr)
-library(stringr)
-library(lubridate)
 library(janitor)
 library(here)
+library(data.table)
 library(dplyr)
-library(stringr)
-library(lubridate)
-library(arrow)
-library(tidymodels)
-library(yardstick)
-
-library(tibble)
-
-library(caret)
-
-library(pROC)
-library(ggplot2)
-library(ranger)
-library(iml)
 library(knitr)
+library(kableExtra)
 library(slider)
-# install.packages("ipumsr")   # Install if needed
-library(ipumsr)
 library(fixest)
-
 library(broom)
 library(gt)
 
@@ -1064,10 +1039,6 @@ p_event_final
 
 ```
 ```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
-
-library(dplyr)
-library(knitr)
-library(kableExtra)
 
 # ---------- Appendix Table C: Event support for event-specific post-mid estimates ----------
 

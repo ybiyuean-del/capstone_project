@@ -96,41 +96,19 @@ Vaghul, K., & Zipperer, B. (2019). *Historical state and sub-state minimum wages
 
 The Quarto files load packages directly at the top of each script. For a full run of the project, the main packages used across the workflow are:
 
-- `arrow`
 - `broom`
-- `caret`
 - `data.table`
-- `dplyr`
 - `fixest`
-- `ggplot2`
-- `glmnet`
 - `gt`
 - `here`
-- `iml`
-- `ipumsr`
 - `janitor`
 - `kableExtra`
 - `knitr`
-- `lubridate`
-- `pROC`
-- `purrr`
-- `ranger`
 - `readxl`
-- `recipes`
-- `rsample`
-- `sf`
 - `slider`
-- `stringr`
-- `tibble`
-- `tidymodels`
-- `tidyr`
-- `tigris`
 - `tidyverse`
-- `yardstick`
-- `randomForest`
-- `xgboost`
 
-Depending on your local R setup, some spatial or machine-learning packages may require additional system dependencies. The core analysis workflow mainly relies on the data wrangling, estimation, table, and plotting packages listed above.
+This list reflects the cleaned package imports used in the current scripts rather than every package that appeared in earlier draft versions of the project.
 
 ## Reproducibility Notes
 

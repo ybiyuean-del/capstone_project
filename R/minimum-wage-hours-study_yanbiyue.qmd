@@ -21,46 +21,18 @@ editor:
 ---
 
 ```{r echo=FALSE, message=FALSE, warning=FALSE, results='hide'}
-# Essential libraries
-# install.packages("caret")
-# install.packages("glmnet")
-# install.packages("ranger")
-# install.packages("randomForest")
-# install.packages("xgboost")
-# install.packages("iml")
-# install.packages("slider")
 library(tidyverse)
 library(readxl)
-library(tidyr)
-library(stringr)
-library(lubridate)
 library(janitor)
 library(here)
+library(data.table)
 library(dplyr)
-library(stringr)
-library(lubridate)
-library(arrow)
-library(tidymodels)
-library(yardstick)
-library(purrr)
-library(tibble)
-library(rsample)   # group_initial_split
-library(caret)
-library(recipes)
-library(glmnet)
-library(pROC)
-library(ggplot2)
-library(ranger)
-library(sf) #to perform spatial joins and cnonect longlats with county information.
-library(tigris) #to pull US census and county data
-library(randomForest)
-library(xgboost)
-library(iml)
 library(knitr)
+library(kableExtra)
 library(slider)
-# install.packages("ipumsr")   # Install if needed
-library(ipumsr)
 library(fixest)
+library(broom)
+library(gt)
 ```
 
 **Abstract**
@@ -99,7 +71,7 @@ Individual-level outcomes and demographic characteristics are obtained from the 
 
 The CPS is a nationally representative monthly household survey conducted by the U.S.
 Census Bureau and the Bureau of Labor Statistics.
-The analysis uses the CPS Outgoing Rotation Group (ORG) files from 2010â€?019, which contain detailed information on hourly wages and usual weekly hours worked.
+The analysis uses the CPS Outgoing Rotation Group (ORG) files from 2010???019, which contain detailed information on hourly wages and usual weekly hours worked.
 The CPS data are organized at the individual-by-month level, providing information on hourly wages, usual weekly hours worked, and demographic characteristics.
 
 The combined dataset therefore links state-by-month minimum wage levels to individual-level labor market outcomes observed at monthly frequency.
@@ -141,7 +113,7 @@ Because minimum wage increases may occur multiple times within a state during th
 Specifically, for each treated state, the event window is truncated so that months falling on or before the previous increase, or on or after the subsequent increase, are excluded from the window for the current event.
 This restriction ensures that $\tau$ within each event window maps to a period in which the treated state experiences only the focal increase.
 
-In addition, the construction of comparison states follows a â€œclean controlsâ€?rule.
+In addition, the construction of comparison states follows a â€œclean controls???rule.
 For a given event $e$, a state is eligible to serve as a control if it does not experience any minimum wage increase within the event window months corresponding to $\tau \in {-12, \ldots, 12}$.
 
 The treated state is always retained by construction, while control states are excluded if they experience an increase anywhere within the event window.
@@ -204,7 +176,7 @@ MW_{se}^{new}
 MW_{se}^{base}.
 $$
 
-A cell is defined as â€œboundâ€?if its pre-policy average wage lies within the wage interval directly affected by the increase.
+A cell is defined as â€œbound???if its pre-policy average wage lies within the wage interval directly affected by the increase.
 
 To account for measurement error and heaping in reported hourly wages, and to maintain sufficient support within each stacked event window, the main specification includes a small tolerance band $\varepsilon$ around the affected wage interval. Very small values of $\varepsilon$ would result in some events lacking observations in either the bound or non-bound group, forcing those events to be dropped from the sample. The baseline specification sets $\varepsilon$ = $0.25, which balances classification accuracy with event retention. Robustness checks using alternative tolerance band definitions are presented in Section 6.1.
 
@@ -258,7 +230,7 @@ This triple-difference structure isolates the differential change in labor suppl
 The CPS ORG microdata are merged with the state-by-month minimum wage panel using state and calendar month identifiers.
 The merge process is explained in detail in Appendix A. The stacked event-study structure described in Section 2.2.3 is then applied, creating event-specific datasets indexed by event time relative to each policy change.
 
-The final stacked dataset contains over three million individual-month observations covering 156 minimum wage increase events across U.S. states and the District of Columbia during 2010â€?019.
+The final stacked dataset contains over three million individual-month observations covering 156 minimum wage increase events across U.S. states and the District of Columbia during 2010???019.
 {{< pagebreak >}}Table 1 reports the final sample counts.
 ```{r echo=FALSE, results='asis'}
 x <- paste(readLines(here::here("tables", "table_counts.tex")), collapse = "\n")
@@ -293,7 +265,7 @@ The empirical strategy is based on a stacked event-study triple-difference (DDD)
 Each policy change defines an event window centered around the month of implementation.
 These event windows are stacked to construct a balanced panel of treated and comparison states within a symmetric time interval surrounding each minimum-wage increase.
 
-The parameter of interest is the effect of minimum-wage increases on usual weekly hours worked among workers belonging to demographic cells whose pre-policy wage position places them within the interval directly affected by the policy (â€œbound cellsâ€?.
+The parameter of interest is the effect of minimum-wage increases on usual weekly hours worked among workers belonging to demographic cells whose pre-policy wage position places them within the interval directly affected by the policy (â€œbound cells???.
 Identification arises from three sources of variation: cross-state differences between treated and comparison states within each event window; cross-cell differences between bound and non-bound demographic cells; and within-state changes over event time relative to the month immediately preceding the policy implementation.
 
 The identifying comparison can be summarized as follows: changes in weekly hours among bound workers in treated states after a minimum-wage increase are compared to contemporaneous changes among (i) non-bound workers within the same states and (ii) workers in comparison states that do not experience a policy change within the same event window.
@@ -368,7 +340,7 @@ These controls account for persistent structural differences in typical hours wo
 Because occupation and industry are strongly correlated with both wage levels and scheduling norms, failing to absorb these dimensions could confound estimated minimum-wage effects with compositional differences across sectors.
 
 A potential concern is that occupation and industry may themselves adjust following minimum-wage increases.
-If so, conditioning on these variables could absorb part of the policy response and introduce â€œbad controlâ€?bias.
+If so, conditioning on these variables could absorb part of the policy response and introduce â€œbad control???bias.
 To evaluate this possibility, the baseline specification is re-estimated without the occupation, industry, and union fixed effects in section 5.2.
 The point estimates remain similar in magnitude and direction across specifications, while statistical precision declines when these controls are omitted.
 In particular, the medium-run coefficient becomes less precisely estimated, although its sign remains unchanged.
@@ -533,13 +505,13 @@ knitr::include_graphics(here::here("tables","table41_combined_clustering.png"))
 ```
 \footnotesize
 \setstretch{1}
-\textit{Notes:} The dependent variable is usual weekly hours worked. The reported coefficients correspond to the interaction between post-treatment indicators, treated status, and bound-worker status in a stacked triple-difference specification. The post (1â€?) and post (7â€?1) indicators correspond to short-run and medium-run post-treatment periods relative to the minimum-wage change event. All specifications include event-by-state, event-by-month, and event-by-cell fixed effects, as well as industry, occupation, and union fixed effects. Regressions are weighted using adjusted CPS earnings weights. Standard errors are clustered as indicated in the column headers. The sample consists of CPS MORG workers in the analysis sample. Bound workers are defined based on baseline wages relative to the minimum wage. Pre-trend Wald tests are reported for leads from event time âˆ? to âˆ?. \*, \*\*, and \*\*\* denote statistical significance at the 10%, 5%, and 1% levels, respectively.
+\textit{Notes:} The dependent variable is usual weekly hours worked. The reported coefficients correspond to the interaction between post-treatment indicators, treated status, and bound-worker status in a stacked triple-difference specification. The post (1???) and post (7???1) indicators correspond to short-run and medium-run post-treatment periods relative to the minimum-wage change event. All specifications include event-by-state, event-by-month, and event-by-cell fixed effects, as well as industry, occupation, and union fixed effects. Regressions are weighted using adjusted CPS earnings weights. Standard errors are clustered as indicated in the column headers. The sample consists of CPS MORG workers in the analysis sample. Bound workers are defined based on baseline wages relative to the minimum wage. Pre-trend Wald tests are reported for leads from event time ??? to ???. \*, \*\*, and \*\*\* denote statistical significance at the 10%, 5%, and 1% levels, respectively.
 
 \normalsize
 \setstretch{2}
 In the short-run window ($\tau = 1$ to $6$), the joint post-treatment effects are statistically indistinguishable from zero (p = 0.42), indicating no immediate adjustment in usual weekly hours following minimum-wage increases.
 
-In the medium-run window ($\tau = 7$â€?11$), the joint test yields statistical significance at 10% level (p = 0.068). The corresponding bin estimates in Table 4.1 indicate a medium-run reduction of approximately 0.46 hours per week under the baseline two-way clustering scheme, with similar point estimates under alternative clustering choices. However, this effect is modest in magnitude and not uniformly distributed across individual event-time coefficients.
+In the medium-run window ($\tau = 7$???11$), the joint test yields statistical significance at 10% level (p = 0.068). The corresponding bin estimates in Table 4.1 indicate a medium-run reduction of approximately 0.46 hours per week under the baseline two-way clustering scheme, with similar point estimates under alternative clustering choices. However, this effect is modest in magnitude and not uniformly distributed across individual event-time coefficients.
 
 Taken together, the baseline specification indicates limited evidence of hours adjustment following minimum-wage increases.
 While a moderate negative effect appears in the medium-term window, the overall pattern suggests that any intensive-margin response is small and temporally localized rather than large or persistent.
@@ -558,13 +530,13 @@ knitr::include_graphics(here::here("tables","table2_dose_response_two_cols.png")
 ```
 \footnotesize
 \setstretch{1}
-\textit{Notes:} The dependent variable is usual weekly hours worked. The baseline specification corresponds to the stacked triple-difference model comparing treated and control states, bound and non-bound workers, before and after minimum-wage changes. The doseâ€“response specification interacts the post-treatment treated Ã— bound indicator with the size of the minimum-wage increase (Î”MW) to test whether treatment effects vary with policy intensity. Post (1â€?) and Post (7â€?1) correspond to short-run and medium-run post-treatment periods, respectively. All regressions include event-by-state, event-by-month, and event-by-cell fixed effects, as well as industry, occupation, and union fixed effects. Regressions are weighted using adjusted CPS earnings weights. Standard errors are clustered at the state and event level. The sample consists of CPS ORG workers in the analysis sample. \*, \*\*, and \*\*\* denote statistical significance at the 10%, 5%, and 1% levels, respectively.
+\textit{Notes:} The dependent variable is usual weekly hours worked. The baseline specification corresponds to the stacked triple-difference model comparing treated and control states, bound and non-bound workers, before and after minimum-wage changes. The doseâ€“response specification interacts the post-treatment treated Ã— bound indicator with the size of the minimum-wage increase (Î”MW) to test whether treatment effects vary with policy intensity. Post (1???) and Post (7???1) correspond to short-run and medium-run post-treatment periods, respectively. All regressions include event-by-state, event-by-month, and event-by-cell fixed effects, as well as industry, occupation, and union fixed effects. Regressions are weighted using adjusted CPS earnings weights. Standard errors are clustered at the state and event level. The sample consists of CPS ORG workers in the analysis sample. \*, \*\*, and \*\*\* denote statistical significance at the 10%, 5%, and 1% levels, respectively.
 
 \normalsize
 \setstretch{2}
-The baseline post-treatment coefficients remain statistically indistinguishable from zero in both the short-run ($\tau = 1$â€?6$) and medium-run ($\tau = 7$â€?11$) windows.
+The baseline post-treatment coefficients remain statistically indistinguishable from zero in both the short-run ($\tau = 1$???6$) and medium-run ($\tau = 7$???11$) windows.
 More importantly, the interaction terms with $\Delta MW_e$ are also small and statistically insignificant.
-In the short-run window, the estimated slope with respect to policy size is 0.429 (s.e. = 0.384), while in the medium-run window the estimate is âˆ?.039 (s.e. = 0.530).
+In the short-run window, the estimated slope with respect to policy size is 0.429 (s.e. = 0.384), while in the medium-run window the estimate is ???.039 (s.e. = 0.530).
 Neither coefficient is statistically different from zero at conventional levels.
 
 These results provide no evidence of a linear doseâ€“response relationship between the magnitude of minimum-wage increases and subsequent changes in hours among bound workers.
@@ -584,15 +556,15 @@ knitr::include_graphics(here::here("tables","table3_shock_terciles.png"))
 ```
 \footnotesize
 \setstretch{1}
-\textit{Notes:} The dependent variable is usual weekly hours worked. The table reports stacked triple-difference estimates separately by terciles of event-level minimum-wage increase size (policy intensity), classified as small, medium, and large minimum-wage changes. The reported coefficients correspond to the interaction between post-treatment indicators, treated status, and bound-worker status within each policy-intensity group. Post (1â€?) and Post (7â€?1) correspond to short-run and medium-run post-treatment periods, respectively. The row labeled â€œEventsâ€?reports the number of distinct minimum-wage policy events in each tercile, while â€œObservationsâ€?reports the number of stacked worker-event-month observations used in estimation. All regressions include event-by-state, event-by-month, and event-by-cell fixed effects, as well as industry, occupation, and union controls. Regressions are weighted using adjusted CPS earnings weights. Standard errors are clustered at the state and event level. Pre-trend Wald tests are reported for leads from event time âˆ? to âˆ? and âˆ? to âˆ?. The sample consists of CPS ORG workers in the analysis sample. \*, \**, and \*** denote statistical significance at the 10%, 5%, and 1% levels, respectively.
+\textit{Notes:} The dependent variable is usual weekly hours worked. The table reports stacked triple-difference estimates separately by terciles of event-level minimum-wage increase size (policy intensity), classified as small, medium, and large minimum-wage changes. The reported coefficients correspond to the interaction between post-treatment indicators, treated status, and bound-worker status within each policy-intensity group. Post (1???) and Post (7???1) correspond to short-run and medium-run post-treatment periods, respectively. The row labeled â€œEvents???reports the number of distinct minimum-wage policy events in each tercile, while â€œObservations???reports the number of stacked worker-event-month observations used in estimation. All regressions include event-by-state, event-by-month, and event-by-cell fixed effects, as well as industry, occupation, and union controls. Regressions are weighted using adjusted CPS earnings weights. Standard errors are clustered at the state and event level. Pre-trend Wald tests are reported for leads from event time ??? to ??? and ??? to ???. The sample consists of CPS ORG workers in the analysis sample. \*, \**, and \*** denote statistical significance at the 10%, 5%, and 1% levels, respectively.
 
 \normalsize
 \setstretch{2}
-In the short-run window ($\tau = 1$â€?6$), none of the tercile groups exhibits statistically significant effects.
+In the short-run window ($\tau = 1$???6$), none of the tercile groups exhibits statistically significant effects.
 Estimated coefficients are small in magnitude and imprecisely estimated across all three groups.
 
-In the medium-run window ($\tau = 7$â€?11$), the small and medium increase groups do not display statistically significant effects.
-For the large increase group, the estimated coefficient is âˆ?.341 (s.e. = 0.201), statistically significant at the 10 percent level.
+In the medium-run window ($\tau = 7$???11$), the small and medium increase groups do not display statistically significant effects.
+For the large increase group, the estimated coefficient is ???.341 (s.e. = 0.201), statistically significant at the 10 percent level.
 This estimate corresponds to a modest reduction in usual weekly hours among bound workers in treated states following relatively large statutory increases.
 
 Several features of the tercile results qualify this pattern.
@@ -625,7 +597,7 @@ Overall, the figure provides little evidence of a sharp threshold or nonlinear d
 
 The empirical results present a consistent pattern across specifications.
 The stacked event-study estimates indicate no immediate adjustment in weekly hours following minimum-wage increases.
-In the medium-run window, however, bound workers exhibit a modest reduction in hours relative to comparison groups, with estimated effects of roughly 0.4â€?.5 hours per week.
+In the medium-run window, however, bound workers exhibit a modest reduction in hours relative to comparison groups, with estimated effects of roughly 0.4???.5 hours per week.
 
 Additional specifications examining heterogeneity by the size of the statutory increase provide limited evidence of systematic doseâ€“response effects.
 Linear interactions with policy size are statistically insignificant, and partitioning events into terciles reveals significant reductions only for the largest increases.
@@ -656,17 +628,17 @@ knitr::include_graphics(here::here("tables","robust_bound_eps_compare.png"))
 ```
 \footnotesize
 \setstretch{1}
-\textit{Notes:} The dependent variable is usual weekly hours worked. The table reports stacked triple-difference estimates using alternative definitions of bound workers based on an earnings distance threshold $\varepsilon$ relative to the minimum wage. Workers are classified as bound if their baseline wage lies within $\varepsilon$ dollars of the minimum wage. Columns vary $\varepsilon$ = 0, 0.25, and 0.50. When $\varepsilon$ = 0, treated events with no bound workers (share_bound = 0) are dropped; the number of dropped treated events is reported in the table. Post (1â€?) and Post (7â€?1) correspond to short-run and medium-run post-treatment periods, respectively. All regressions include event-by-state, event-by-month, and event-by-cell fixed effects, as well as industry, occupation, and union fixed effects, and age and age-squared controls. Regressions are weighted using adjusted CPS earnings weights. Standard errors are clustered at the state and event level. The sample consists of CPS ORG workers in the analysis sample. \*, \*\*, and \*\*\* denote statistical significance at the 10%, 5%, and 1% levels, respectively.
+\textit{Notes:} The dependent variable is usual weekly hours worked. The table reports stacked triple-difference estimates using alternative definitions of bound workers based on an earnings distance threshold $\varepsilon$ relative to the minimum wage. Workers are classified as bound if their baseline wage lies within $\varepsilon$ dollars of the minimum wage. Columns vary $\varepsilon$ = 0, 0.25, and 0.50. When $\varepsilon$ = 0, treated events with no bound workers (share_bound = 0) are dropped; the number of dropped treated events is reported in the table. Post (1???) and Post (7???1) correspond to short-run and medium-run post-treatment periods, respectively. All regressions include event-by-state, event-by-month, and event-by-cell fixed effects, as well as industry, occupation, and union fixed effects, and age and age-squared controls. Regressions are weighted using adjusted CPS earnings weights. Standard errors are clustered at the state and event level. The sample consists of CPS ORG workers in the analysis sample. \*, \*\*, and \*\*\* denote statistical significance at the 10%, 5%, and 1% levels, respectively.
 
 \normalsize
 \setstretch{2}
 Across specifications, joint pre-treatment Wald tests over $\tau \in [-6,-2]$ fail to reject the null of no differential pre-trend.
 Pre-trend $p$-values remain above conventional significance thresholds for all values of $\varepsilon$, indicating that the parallel-trends diagnostics are not driven by the choice of exposure tolerance.
 
-In the short-run window ($\tau = 1$â€?6$), estimated coefficients are small in magnitude across specifications.
+In the short-run window ($\tau = 1$???6$), estimated coefficients are small in magnitude across specifications.
 Only the $\varepsilon = 0.50$ definition yields marginal significance at the 10 percent level, and the point estimates remain economically modest.
 
-In the medium-run window ($\tau = 7$â€?11$), the estimated coefficient is negative for all values of $\varepsilon$.
+In the medium-run window ($\tau = 7$???11$), the estimated coefficient is negative for all values of $\varepsilon$.
 The magnitude is largest at $\varepsilon = 0.25$, smaller at $\varepsilon = 0.50$, and remains negative when $\varepsilon = 0$.
 Statistical significance is strongest under the smallest tolerance and attenuates as the bound interval expands.
 
@@ -686,11 +658,11 @@ knitr::include_graphics(here::here("tables","robust_drop_controls.png"))
 ```
 \footnotesize
 \setstretch{1}
-\textit{Notes:} The dependent variable is usual weekly hours worked. The table reports stacked triple-difference estimates comparing treated and control states, bound and non-bound workers, before and after minimum-wage changes. The first column includes the full set of industry, occupation, and union fixed effects, while the second column drops these controls to assess robustness to their inclusion. Post (1â€?) and Post (7â€?1) correspond to short-run and medium-run post-treatment periods, respectively. All regressions include event-by-state, event-by-month, and event-by-cell fixed effects. Regressions are weighted using CPS earnings weights. Standard errors are clustered at the state and event level. The sample consists of CPS MORG workers in the analysis sample. \*, \*\*, and \*\*\* denote statistical significance at the 10%, 5%, and 1% levels, respectively.
+\textit{Notes:} The dependent variable is usual weekly hours worked. The table reports stacked triple-difference estimates comparing treated and control states, bound and non-bound workers, before and after minimum-wage changes. The first column includes the full set of industry, occupation, and union fixed effects, while the second column drops these controls to assess robustness to their inclusion. Post (1???) and Post (7???1) correspond to short-run and medium-run post-treatment periods, respectively. All regressions include event-by-state, event-by-month, and event-by-cell fixed effects. Regressions are weighted using CPS earnings weights. Standard errors are clustered at the state and event level. The sample consists of CPS MORG workers in the analysis sample. \*, \*\*, and \*\*\* denote statistical significance at the 10%, 5%, and 1% levels, respectively.
 
 \normalsize
 \setstretch{2}
-When these controls are included, the medium-run bin coefficient for $\tau = 7$â€?11$ is negative and marginally statistically significant. Dropping the controls reduces the magnitude of the estimate and eliminates statistical significance, although the coefficient remains negative. The short-run bin ($\tau = 1$â€?6$) remains small and statistically indistinguishable from zero under both specifications.
+When these controls are included, the medium-run bin coefficient for $\tau = 7$???11$ is negative and marginally statistically significant. Dropping the controls reduces the magnitude of the estimate and eliminates statistical significance, although the coefficient remains negative. The short-run bin ($\tau = 1$???6$) remains small and statistically indistinguishable from zero under both specifications.
 
 Pre-trend diagnostics are stable across specifications. The Wald test for joint significance of the pre-period coefficients over $\tau = -6$ to $-2$ yields large $p$-values in both models, indicating no evidence of differential pre-treatment trends.
 
@@ -728,7 +700,7 @@ Overall, the evidence suggests that minimum wage increases during the sample per
 Cengiz, D., Dube, A., Lindner, A., & Zipperer, B.
 (2019).
 The effect of minimum wages on low-wage jobs.
-*The Quarterly Journal of Economics, 134*(3), 1405â€?454.
+*The Quarterly Journal of Economics, 134*(3), 1405???454.
 https://doi.org/10.1093/qje/qjz014
 
 Clemens, J., & Strain, M. R.
@@ -740,7 +712,7 @@ https://www.aei.org/research-products/working-paper/the-heterogeneous-effects-of
 Dube, A., Lester, T. W., & Reich, M.
 (2016).
 Minimum wage shocks, employment flows, and labor market frictions.
-*Journal of Labor Economics, 34*(3), 663â€?04.
+*Journal of Labor Economics, 34*(3), 663???04.
 https://doi.org/10.1086/685449
 
 Flood, S., King, M., Rodgers, R., Ruggles, S., Warren, J. R., et al. (2025).
@@ -751,7 +723,7 @@ https://doi.org/10.18128/D030.V13.0
 Redmond, P., & McGuinness, S.
 (2025).
 The impact of a minimum wage increase on hours worked: Heterogeneous effects by gender and sector.
-*Economica, 92*(365), 84â€?06.
+*Economica, 92*(365), 84???06.
 https://doi.org/10.1111/ecca.12555
 
 Vaghul, K., & Zipperer, B.
@@ -762,7 +734,7 @@ https://github.com/benzipperer/historicalminwage/releases/tag/v1.2.0
 Zavodny, M.
 (2000).
 The effect of the minimum wage on employment and hours.
-*Labour Economics, 7*(6), 729â€?50.
+*Labour Economics, 7*(6), 729???50.
 https://doi.org/10.1016/S0927-5371(00)00021-X
 
 {{< pagebreak >}}**Appendix**
@@ -800,11 +772,11 @@ knitr::include_graphics(here::here("tables",("app_tau_event_support.png")))
 ```
 \footnotesize
 \setstretch{1}
-\textit{Notes:} This table reports the number of policy events contributing observations at each event time in the stacked event-study sample. â€œEvents (any obs)â€?counts the number of events with at least one observation in the stacked panel at event time Ï„, while â€œEvents (treated obs)â€?counts the number of events with at least one treated observation at that event time. Event support declines at longer horizons because not all policy events have complete event windows within the sample period, particularly for late policy changes near the end of the sample. Therefore, long-run estimates are based on a smaller subset of events.
+\textit{Notes:} This table reports the number of policy events contributing observations at each event time in the stacked event-study sample. â€œEvents (any obs)???counts the number of events with at least one observation in the stacked panel at event time Ï„, while â€œEvents (treated obs)???counts the number of events with at least one treated observation at that event time. Event support declines at longer horizons because not all policy events have complete event windows within the sample period, particularly for late policy changes near the end of the sample. Therefore, long-run estimates are based on a smaller subset of events.
 
 \normalsize
 \setstretch{2}
-Event support is broadly stable from $\tau = -6$ through $\tau = 11$, with approximately 147â€?56 distinct events contributing treated observations at each month.
+Event support is broadly stable from $\tau = -6$ through $\tau = 11$, with approximately 147???56 distinct events contributing treated observations at each month.
 In contrast, support declines sharply at $\tau = 12$, where only 23 events remain in the stacked sample.
 This discontinuous reduction reflects the mechanical structure of staggered adoption combined with the finite panel horizon.
 
