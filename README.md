@@ -4,6 +4,8 @@ This repository contains the code, intermediate outputs, and paper files for a c
 
 Using CPS ORG microdata from IPUMS CPS and a stacked event-study design, the project builds event-level treatment windows around state minimum wage increases between 2010 and 2019. The analysis compares workers whose pre-policy wages fall near the relevant minimum wage threshold with higher-paid comparison workers in the same event window. The main results suggest little evidence of immediate hours adjustments and only modest medium-run reductions in hours among workers most exposed to the policy change.
 
+![Event-specific effects by minimum-wage increase size](tables/fig_event_specific_postmid_vs_deltaMW_final.png)
+
 ## Repository Structure
 
 - `R/`
@@ -79,7 +81,7 @@ Created in `02_Main estimations.qmd`:
 
 The CPS data used in this project come from [IPUMS CPS](https://cps.ipums.org/cps/), where registered users can create and download extracts directly. The minimum wage panel used here is based on the historical state minimum wage dataset from Vaghul and Zipperer (2019): [Historical state and sub-state minimum wages, Version 1.2.0](https://github.com/benzipperer/historicalminwage/releases/tag/v1.2.0).
 
-Because the CPS extract file is large, and because users can generate their own extract from IPUMS, a public version of this repository may omit the raw CPS file from version control. If the raw data are not included in the repository, place the required files in `data/raw/` before running the pipeline.
+The raw CPS extract is not included in this public repository because the file is large and can be recreated directly from IPUMS. To reproduce the full pipeline, place the required raw files in `data/raw/` before running the scripts.
 
 Expected raw inputs:
 
